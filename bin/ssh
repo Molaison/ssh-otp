@@ -1,0 +1,5 @@
+#!/bin/sh
+# PATH shim: makes `ssh` (and scp/rsync/git that spawn ssh) use the OTP wrapper.
+# Put this directory ($HOME/.ssh/ssh_otp/bin) at the front of PATH (shellrc.sh
+# does this). ssh_totp.py excludes this shim when locating the real ssh.
+exec "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/sshotp" "$@"

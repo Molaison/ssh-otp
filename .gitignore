@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+._*
+.state/
+.codex-tasks/
+*.log
+*.bak
+*.bak-*
+*.tmp
+cm/
+

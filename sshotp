@@ -1,0 +1,19 @@
+#!/bin/sh
+# sshotp -- run ssh with automatic TOTP answering + connection multiplexing.
+#
+# Point anything that needs OTP-aware ssh at this script:
+#   * VS Code:  "remote.SSH.path": ".../ssh_otp/sshotp"
+#   * git:      git config --global core.sshCommand ".../ssh_otp/sshotp"
+#   * rsync:    rsync -e ".../ssh_otp/sshotp" ...
+#   * shell:    handled automatically via ssh_otp/bin on PATH (see shellrc.sh)
+#
+# All logic lives in ssh_totp.py; this is just a launcher that finds python.
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+py="${SSH_TOTP_PYTHON:-}"
+if [ -z "$py" ]; then
+  for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1; then py="$c"; break; fi
+  done
+fi
+[ -n "$py" ] || { echo "sshotp: no python interpreter found" >&2; exit 127; }
+exec "$py" "$dir/ssh_totp.py" "$@"

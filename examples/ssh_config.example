@@ -1,0 +1,39 @@
+# Direct OTP gateway.
+# Replace BASE32SECRET, host, user, port, and key path.
+# totp_secret: BASE32SECRET
+# totp_prompt: verification|verify|otp|2fa|two[- ]factor|authenticator|one[- ]time password|oath|code
+Host X
+    HostName gateway.example.com
+    User user
+    Port 50001
+    IdentityFile ~/.ssh/id_rsa
+
+# Direct OTP host.
+# totp_secret: BASE32SECRET
+# totp_prompt: verification|verify|otp|2fa|two[- ]factor|authenticator|one[- ]time password|oath|code
+Host x
+    HostName 192.168.1.10
+    User user
+    Port 22
+    IdentityFile ~/.ssh/id_rsa
+    KbdInteractiveAuthentication yes
+    NumberOfPasswordPrompts 3
+
+# Windows SOCKS-backed node behind X.
+Host f101-windows
+    HostName f101.internal.example.com
+    User user
+    ProxyCommand C:/Users/YOU/.ssh/ssh_otp/sshotp.cmd --socks %h %p
+
+# POSIX SOCKS-backed node behind X.
+Host f101-posix
+    HostName f101.internal.example.com
+    User user
+    ProxyCommand ~/.ssh/ssh_otp/sshotp --socks %h %p
+
+# Ordinary host. The wrapper passes this through unchanged.
+Host ordinary
+    HostName ordinary.example.com
+    User user
+    IdentityFile ~/.ssh/id_rsa
+
