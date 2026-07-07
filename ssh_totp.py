@@ -73,6 +73,30 @@ def _target_from_ssh_args(args: List[str]) -> Optional[str]:
     return None
 
 
+def _args_through_target(args: List[str]) -> List[str]:
+    """Return SSH args through the target, dropping the remote command."""
+    result: List[str] = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            result.append(arg)
+            skip_next = False
+            continue
+        if arg == "--":
+            result.append(arg)
+            continue
+        if arg in OPTIONS_WITH_VALUE:
+            result.append(arg)
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            result.append(arg)
+            continue
+        result.append(arg)
+        return result
+    return result
+
+
 def _host_part(target: str) -> str:
     return target.rsplit("@", 1)[-1]
 
@@ -171,7 +195,7 @@ def _read_config(config_path: str) -> Tuple[List[Tuple[List[str], Dict[str, str]
             stripped = raw_line.strip()
             lower = stripped.lower()
             if stripped.startswith("#"):
-                meta = re.match(r"#\s*(totp_secret|totp_prompt)\s*:\s*(.*)$", stripped, re.IGNORECASE)
+                meta = re.match(r"#\s*(totp_secret|totp_prompt|totp_master)\s*:\s*(.*)$", stripped, re.IGNORECASE)
                 if meta:
                     pending_metadata[meta.group(1).lower()] = meta.group(2).strip()
                 continue
@@ -243,6 +267,7 @@ def _metadata_totp(config_path: str, alias: str) -> Optional[dict]:
         "alias": alias,
         "secret": secret,
         "prompt": metadata.get("totp_prompt", ""),
+        "master": metadata.get("totp_master", "").lower() in {"1", "true", "yes", "on"},
         "via_proxy": False,
     }
 
@@ -397,6 +422,18 @@ def _real_ssh_executable() -> str:
     raise FileNotFoundError("ssh executable not found")
 
 
+def _plain_ssh_executable() -> str:
+    """Locate the plain OpenSSH client for transparent config-driven targets."""
+    configured = os.environ.get("SSH_TOTP_PLAIN_SSH", "")
+    if configured and os.path.isfile(configured):
+        return configured
+    if _is_windows():
+        system32 = r"C:\Windows\System32\OpenSSH\ssh.exe"
+        if os.path.isfile(system32):
+            return system32
+    return _real_ssh_executable()
+
+
 # --------------------------------------------------------------------------- #
 # multiplexing + environment
 # --------------------------------------------------------------------------- #
@@ -491,6 +528,53 @@ def socks_master_args(argv: List[str]) -> List[str]:
     return ["-D", os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)]
 
 
+def _uses_master_control(argv: List[str]) -> bool:
+    return _has_short_flag(argv, "N") or "-O" in argv
+
+
+def _expanded_controlpath(real_ssh: str, argv: List[str], mux: List[str]) -> Optional[str]:
+    base = _args_through_target(argv)
+    if not _target_from_ssh_args(base):
+        return None
+    try:
+        result = subprocess.run(
+            [real_ssh, "-G", *mux, *base],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key.lower() == "controlpath":
+            return value.strip()
+    return None
+
+
+def _prune_stale_control_socket(real_ssh: str, argv: List[str], mux: List[str]) -> None:
+    if "-O" in argv:
+        return
+    controlpath = _expanded_controlpath(real_ssh, argv, mux)
+    if not controlpath or not os.path.exists(controlpath):
+        return
+    base = _args_through_target(argv)
+    check = subprocess.run(
+        [real_ssh, *mux, "-O", "check", *base],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if check.returncode != 0:
+        os.unlink(controlpath)
+
+
 def _askpass_program() -> str:
     name = "totp_askpass.cmd" if _is_windows() else "totp_askpass.py"
     return os.path.join(SCRIPT_DIR, name)
@@ -518,14 +602,20 @@ def run_wrapper(argv: List[str]) -> int:
     real_ssh = _real_ssh_executable()
     if totp:
         if totp.get("via_proxy"):
-            cmd = [real_ssh, *argv]
+            cmd = [_plain_ssh_executable(), *argv]
             env = _env_with_totp(None, real_ssh)
+        elif not totp.get("master") or not _uses_master_control(argv):
+            final = normalize_totp_args(argv)
+            cmd = [real_ssh, *final]
+            env = _env_with_totp(totp, real_ssh)
         else:
             final = normalize_totp_args(argv)
-            cmd = [real_ssh, *multiplex_args(final), *socks_master_args(final), *final]
+            mux = multiplex_args(final)
+            _prune_stale_control_socket(real_ssh, final, mux)
+            cmd = [real_ssh, *mux, *socks_master_args(final), *final]
             env = _env_with_totp(totp, real_ssh)
     else:
-        cmd = [real_ssh, *argv]
+        cmd = [_plain_ssh_executable(), *argv]
         env = _env_with_totp(None, real_ssh)
     return subprocess.call(cmd, env=env)
 

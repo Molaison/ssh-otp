@@ -42,6 +42,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
             # ===== X =====
             # totp_secret: SECRETX
             # totp_prompt: otp
+            # totp_master: yes
             Host X
                 HostName 61.50.130.61
                 User zpzeng
@@ -62,9 +63,11 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertEqual(upper["alias"], "X")
         self.assertEqual(upper["secret"], "SECRETX")
         self.assertFalse(upper["via_proxy"])
+        self.assertTrue(upper["master"])
         self.assertEqual(lower["alias"], "x")
         self.assertEqual(lower["secret"], "SECRETLOWER")
         self.assertFalse(lower["via_proxy"])
+        self.assertFalse(lower["master"])
 
     def test_debug_proxy_command_resolves_jump_alias_totp(self):
         config = self.write_config(
@@ -254,11 +257,11 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertNotIn("ControlMaster", " ".join(ssh_totp.multiplex_args(["-M", "x"])))
         self.assertNotIn("ControlPath", " ".join(ssh_totp.multiplex_args(["-o", "ControlPath=/tmp/s", "x"])))
 
-    def test_run_wrapper_injects_multiplex_and_totp_env(self):
+    def test_run_wrapper_uses_askpass_without_multiplex_for_regular_master_command(self):
         calls = []
 
         def fake_resolve(args, config_path=None):
-            return {"alias": "x", "secret": "SECRETLOWER", "prompt": "otp"}
+            return {"alias": "x", "secret": "SECRETLOWER", "prompt": "otp", "master": True}
 
         def fake_call(args, env):
             calls.append((args, env))
@@ -272,8 +275,9 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         argv, env = calls[0]
         joined = " ".join(argv)
         self.assertEqual(argv[0], "REAL-SSH")
-        self.assertIn("ControlMaster=auto", joined)
-        self.assertIn("ControlPersist=", joined)
+        self.assertIn("batchmode=no", joined)
+        self.assertNotIn("ControlMaster", joined)
+        self.assertNotIn("ControlPath", joined)
         self.assertEqual(env["SSH_TOTP_SECRET"], "SECRETLOWER")
         self.assertEqual(env["SSH_ASKPASS_REQUIRE"], "force")
         self.assertTrue(env["SSH_ASKPASS"].endswith(("totp_askpass.cmd", "totp_askpass.py")))
@@ -282,7 +286,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         calls = []
 
         def fake_resolve(args, config_path=None):
-            return {"alias": "X", "secret": "SECRETX", "prompt": "otp"}
+            return {"alias": "X", "secret": "SECRETX", "prompt": "otp", "master": True}
 
         def fake_call(args, env):
             calls.append((args, env))
@@ -303,6 +307,29 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertIn("-D", argv)
         self.assertIn("127.0.0.1:7070", argv)
 
+    def test_run_wrapper_uses_askpass_without_multiplex_for_direct_non_master(self):
+        calls = []
+
+        def fake_resolve(args, config_path=None):
+            return {"alias": "x", "secret": "SECRETLOWER", "prompt": "otp", "master": False}
+
+        def fake_call(args, env):
+            calls.append((args, env))
+            return 0
+
+        with self.patched_attr(ssh_totp, "resolve_totp_for_args", fake_resolve):
+            with self.patched_attr(ssh_totp, "_real_ssh_executable", lambda: "REAL-SSH"):
+                with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                    self.assertEqual(ssh_totp.run_wrapper(["x", "true"]), 0)
+
+        argv, env = calls[0]
+        self.assertEqual(argv[0], "REAL-SSH")
+        joined = " ".join(argv)
+        self.assertIn("batchmode=no", joined)
+        self.assertNotIn("ControlMaster", joined)
+        self.assertNotIn("ControlPath", joined)
+        self.assertEqual(env["SSH_TOTP_SECRET"], "SECRETLOWER")
+
     def test_proxycommand_socks_resolves_gateway_totp(self):
         config = self.write_config(
             """
@@ -314,6 +341,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
             # ===== X =====
             # totp_secret: SECRETX
             # totp_prompt: otp
+            # totp_master: yes
             Host X
                 HostName 61.50.130.61
                 User zpzeng
@@ -335,11 +363,12 @@ class SSHTOTPRegressionTests(unittest.TestCase):
 
         with self.patched_attr(ssh_totp, "resolve_totp_for_args", fake_resolve):
             with self.patched_attr(ssh_totp, "_real_ssh_executable", lambda: "REAL-SSH"):
-                with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
-                    self.assertEqual(ssh_totp.run_wrapper(["ty", "true"]), 0)
+                with self.patched_attr(ssh_totp, "_plain_ssh_executable", lambda: "PLAIN-SSH"):
+                    with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                        self.assertEqual(ssh_totp.run_wrapper(["ty", "true"]), 0)
 
         argv, env = calls[0]
-        self.assertEqual(argv, ["REAL-SSH", "ty", "true"])
+        self.assertEqual(argv, ["PLAIN-SSH", "ty", "true"])
         joined = " ".join(argv)
         self.assertNotIn("ControlMaster", joined)
         self.assertNotIn("ControlPath", joined)
@@ -359,17 +388,47 @@ class SSHTOTPRegressionTests(unittest.TestCase):
 
         with self.patched_attr(ssh_totp, "resolve_totp_for_args", fake_resolve):
             with self.patched_attr(ssh_totp, "_real_ssh_executable", lambda: "REAL-SSH"):
-                with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
-                    self.assertEqual(ssh_totp.run_wrapper(["f101", "true"]), 0)
+                with self.patched_attr(ssh_totp, "_plain_ssh_executable", lambda: "PLAIN-SSH"):
+                    with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                        self.assertEqual(ssh_totp.run_wrapper(["f101", "true"]), 0)
 
         argv, env = calls[0]
-        self.assertEqual(argv, ["REAL-SSH", "f101", "true"])
+        self.assertEqual(argv, ["PLAIN-SSH", "f101", "true"])
         joined = " ".join(argv)
         self.assertNotIn("ControlMaster", joined)
         self.assertNotIn("ControlPath", joined)
         self.assertNotIn("ControlPersist", joined)
         self.assertNotIn("SSH_ASKPASS", env)
         self.assertNotIn("SSH_TOTP_SECRET", env)
+
+    def test_run_wrapper_prunes_stale_control_socket_for_direct_totp(self):
+        calls = []
+        removed = []
+
+        def fake_resolve(args, config_path=None):
+            return {"alias": "x", "secret": "SECRETLOWER", "prompt": "otp", "via_proxy": False, "master": True}
+
+        def fake_run(args, **kwargs):
+            if "-G" in args:
+                return __import__("subprocess").CompletedProcess(args, 0, "controlpath C:/tmp/ssh-otp-stale\n", "")
+            if "-O" in args:
+                return __import__("subprocess").CompletedProcess(args, 255, "", "stale\n")
+            raise AssertionError(args)
+
+        def fake_call(args, env):
+            calls.append((args, env))
+            return 0
+
+        with self.patched_attr(ssh_totp, "resolve_totp_for_args", fake_resolve):
+            with self.patched_attr(ssh_totp, "_real_ssh_executable", lambda: "REAL-SSH"):
+                with self.patched_attr(ssh_totp.subprocess, "run", fake_run):
+                    with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                        with self.patched_attr(ssh_totp.os.path, "exists", lambda path: path == "C:/tmp/ssh-otp-stale"):
+                            with self.patched_attr(ssh_totp.os, "unlink", lambda path: removed.append(path)):
+                                self.assertEqual(ssh_totp.run_wrapper(["-MNf", "x"]), 0)
+
+        self.assertEqual(removed, ["C:/tmp/ssh-otp-stale"])
+        self.assertEqual(calls[0][0][0], "REAL-SSH")
 
     def test_real_ssh_discovery_override_and_never_self(self):
         old = os.environ.get("SSH_TOTP_REAL_SSH")

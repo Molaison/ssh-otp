@@ -36,6 +36,7 @@ The direct OTP aliases are ordinary `Host` blocks with metadata comments:
 ```sshconfig
 # totp_secret: BASE32SECRET
 # totp_prompt: verification|otp|code
+# totp_master: yes
 Host X
     HostName gateway.example.com
     User user
@@ -92,4 +93,3 @@ otp-down X
 ```sh
 python ~/.ssh/ssh_otp/test_ssh_totp_regression.py
 ```
-

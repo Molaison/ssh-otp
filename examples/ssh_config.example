@@ -2,6 +2,7 @@
 # Replace BASE32SECRET, host, user, port, and key path.
 # totp_secret: BASE32SECRET
 # totp_prompt: verification|verify|otp|2fa|two[- ]factor|authenticator|one[- ]time password|oath|code
+# totp_master: yes
 Host X
     HostName gateway.example.com
     User user
@@ -36,4 +37,3 @@ Host ordinary
     HostName ordinary.example.com
     User user
     IdentityFile ~/.ssh/id_rsa
-

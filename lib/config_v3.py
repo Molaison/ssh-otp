@@ -189,7 +189,8 @@ class SSHConfigLoaderV3:
             'location': '',
             'password': '',
             'totp_secret': '',
-            'totp_prompt': ''
+            'totp_prompt': '',
+            'totp_master': ''
         }
 
         # 读取 config 文件，查找该 Host 前的注释
@@ -258,6 +259,8 @@ class SSHConfigLoaderV3:
                     metadata['totp_secret'] = value
                 elif key == 'totp_prompt':
                     metadata['totp_prompt'] = value
+                elif key == 'totp_master':
+                    metadata['totp_master'] = value
 
         return metadata
 
