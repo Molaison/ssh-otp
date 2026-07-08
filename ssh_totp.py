@@ -34,6 +34,7 @@ MUX_DIR = os.path.expanduser("~/.ssh/cm")
 CONTROL_PATH = "~/.ssh/cm/%C"
 CONTROL_PERSIST = "8h"
 DEFAULT_SOCKS = "127.0.0.1:7070"
+SOCKS_CLIENT_DRAIN_GRACE_SECONDS = 2.0
 
 OPTIONS_WITH_VALUE = {
     "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
@@ -665,6 +666,13 @@ def _socks_relay(host: str, port: str) -> int:
     in_fd = sys.stdin.fileno()
     out_fd = sys.stdout.fileno()
 
+    def close_stdout_pipe() -> None:
+        try:
+            os.close(out_fd)
+        except OSError:
+            return
+        sys.stdout = None
+
     def pump_stdin() -> None:
         try:
             while True:
@@ -680,7 +688,8 @@ def _socks_relay(host: str, port: str) -> int:
             except OSError:
                 pass
 
-    threading.Thread(target=pump_stdin, daemon=True).start()
+    stdin_thread = threading.Thread(target=pump_stdin, daemon=True)
+    stdin_thread.start()
     try:
         while True:
             data = sock.recv(65536)
@@ -689,6 +698,13 @@ def _socks_relay(host: str, port: str) -> int:
             os.write(out_fd, data)
     except OSError:
         pass
+    finally:
+        close_stdout_pipe()
+        stdin_thread.join(SOCKS_CLIENT_DRAIN_GRACE_SECONDS)
+        try:
+            sock.close()
+        except OSError:
+            pass
     return 0
 
 

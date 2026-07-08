@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+import threading
+import time
 import textwrap
 import unittest
 from contextlib import contextmanager
@@ -400,6 +402,75 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertNotIn("ControlPersist", joined)
         self.assertNotIn("SSH_ASKPASS", env)
         self.assertNotIn("SSH_TOTP_SECRET", env)
+
+    def test_socks_relay_drains_client_disconnect_after_remote_eof(self):
+        import socket
+
+        sent = []
+        writes = []
+        closed = []
+        shutdowns = []
+
+        class FakeFile:
+            def __init__(self, fd):
+                self.fd = fd
+
+            def fileno(self):
+                return self.fd
+
+        class FakeSocket:
+            def __init__(self):
+                self.recv_chunks = [
+                    b"\x05\x00",
+                    b"\x05\x00\x00\x01",
+                    b"\x00\x00\x00\x00\x00\x00",
+                    b"",
+                ]
+
+            def sendall(self, data):
+                sent.append(data)
+
+            def recv(self, _size):
+                return self.recv_chunks.pop(0)
+
+            def shutdown(self, how):
+                shutdowns.append(how)
+
+            def close(self):
+                pass
+
+        reads = [b"client-disconnect", b""]
+        read_started = threading.Event()
+
+        def fake_read(_fd, _size):
+            read_started.set()
+            if reads:
+                time.sleep(0.05)
+                return reads.pop(0)
+            return b""
+
+        def fake_write(_fd, data):
+            writes.append(data)
+            return len(data)
+
+        fake_socket = FakeSocket()
+
+        with self.patched_attr(socket, "create_connection", lambda *_args, **_kwargs: fake_socket):
+            with self.patched_attr(ssh_totp.sys, "stdin", FakeFile(100)):
+                with self.patched_attr(ssh_totp.sys, "stdout", FakeFile(200)):
+                    with self.patched_attr(ssh_totp.os, "read", fake_read):
+                        with self.patched_attr(ssh_totp.os, "write", fake_write):
+                            with self.patched_attr(ssh_totp.os, "close", lambda fd: closed.append(fd)):
+                                start = time.monotonic()
+                                self.assertEqual(ssh_totp._socks_relay("f101.hn.org", "22"), 0)
+                                elapsed = time.monotonic() - start
+
+        self.assertTrue(read_started.is_set())
+        self.assertGreaterEqual(elapsed, 0.04)
+        self.assertIn(b"client-disconnect", sent)
+        self.assertIn(200, closed)
+        self.assertEqual(writes, [])
+        self.assertTrue(shutdowns)
 
     def test_run_wrapper_prunes_stale_control_socket_for_direct_totp(self):
         calls = []
