@@ -19,6 +19,8 @@ import shlex
 from typing import Dict, Optional, List
 from pathlib import Path
 
+DEFAULT_JUMP_ALIAS = 'x'
+
 try:
     import paramiko
 except ImportError:
@@ -360,11 +362,11 @@ class SSHConfigLoaderV3:
                 if target:
                     return [self._host_part(target)]
             if proxy_program in {'debug_proxy.cmd', 'debug_proxy.sh', 'debug_proxy_win.py'}:
-                return [os.environ.get('SSH_TOTP_JUMP_ALIAS', 'X')]
+                return [os.environ.get('SSH_TOTP_JUMP_ALIAS', DEFAULT_JUMP_ALIAS)]
             if proxy_program in {'sshotp', 'sshotp.cmd', 'ssh_totp.py'} and '--socks' in tokens:
-                return [os.environ.get('SSH_TOTP_JUMP_ALIAS', 'X')]
+                return [os.environ.get('SSH_TOTP_JUMP_ALIAS', DEFAULT_JUMP_ALIAS)]
             if len(tokens) > 1 and os.path.basename(tokens[1]).lower() == 'ssh_totp.py' and '--socks' in tokens:
-                return [os.environ.get('SSH_TOTP_JUMP_ALIAS', 'X')]
+                return [os.environ.get('SSH_TOTP_JUMP_ALIAS', DEFAULT_JUMP_ALIAS)]
 
         return [self._host_part(match) for match in re.findall(r'[\w.-]+@([A-Za-z0-9_.-]+)', proxy_command)]
 

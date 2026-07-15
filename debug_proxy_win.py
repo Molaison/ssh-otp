@@ -17,7 +17,7 @@ def main(argv=None) -> int:
     host, port = argv
     script_dir = Path(__file__).resolve().parent
     config_file = os.environ.get("SSH_TOTP_CONFIG", str(Path.home() / ".ssh" / "config"))
-    jump_alias = os.environ.get("SSH_TOTP_JUMP_ALIAS", "X")
+    jump_alias = ssh_totp.default_jump_alias()
     real_ssh = os.environ.get("SSH_TOTP_REAL_SSH", r"C:\Windows\System32\OpenSSH\ssh.exe")
 
     totp = ssh_totp.resolve_totp_for_args([jump_alias], config_file)

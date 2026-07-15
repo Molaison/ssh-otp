@@ -19,12 +19,16 @@ regression tests. Public surface kept stable: ``resolve_totp_for_args``,
 ``normalize_totp_args`` and ``main``.
 """
 import fnmatch
+import hashlib
 import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Dict, List, Optional, Tuple
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -34,7 +38,13 @@ MUX_DIR = os.path.expanduser("~/.ssh/cm")
 CONTROL_PATH = "~/.ssh/cm/%C"
 CONTROL_PERSIST = "8h"
 DEFAULT_SOCKS = "127.0.0.1:7070"
+DEFAULT_JUMP_ALIAS = "x"
 SOCKS_CLIENT_DRAIN_GRACE_SECONDS = 2.0
+SOCKS_CONNECT_TIMEOUT_SECONDS = 0.5
+SOCKS_START_READY_TIMEOUT_SECONDS = 15.0
+SOCKS_START_LOCK_TIMEOUT_SECONDS = 120.0
+SOCKS_START_STALE_LOCK_SECONDS = 180.0
+SOCKS_START_POLL_SECONDS = 0.2
 
 OPTIONS_WITH_VALUE = {
     "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L",
@@ -112,6 +122,10 @@ def _hop_host(hop: str) -> str:
 
 def _program_name(command: str) -> str:
     return re.split(r"[\\/]", command.strip("\"'"))[-1].lower()
+
+
+def default_jump_alias() -> str:
+    return os.environ.get("SSH_TOTP_JUMP_ALIAS", DEFAULT_JUMP_ALIAS)
 
 
 def _ssh_option_key(option: str) -> str:
@@ -300,11 +314,11 @@ def _proxy_targets(config_path: str, alias: str) -> List[str]:
                 if target:
                     targets.append(_host_part(target))
             elif proxy_program in {"debug_proxy.cmd", "debug_proxy.sh", "debug_proxy_win.py"}:
-                targets.append(os.environ.get("SSH_TOTP_JUMP_ALIAS", "X"))
+                targets.append(default_jump_alias())
             elif proxy_program in {"sshotp", "sshotp.cmd", "ssh_totp.py"} and "--socks" in tokens:
-                targets.append(os.environ.get("SSH_TOTP_JUMP_ALIAS", "X"))
+                targets.append(default_jump_alias())
             elif len(tokens) > 1 and _program_name(tokens[1]) == "ssh_totp.py" and "--socks" in tokens:
-                targets.append(os.environ.get("SSH_TOTP_JUMP_ALIAS", "X"))
+                targets.append(default_jump_alias())
             else:
                 targets.extend(
                     _host_part(m) for m in re.findall(r"[\w.-]+@([A-Za-z0-9_.-]+)", proxy_command)
@@ -524,9 +538,17 @@ def _has_dynamic_forward(argv: List[str]) -> bool:
 
 def socks_master_args(argv: List[str]) -> List[str]:
     """Open the gateway SOCKS listener for master sessions such as ssh -MNf X."""
-    if not _has_short_flag(argv, "N") or _has_dynamic_forward(argv):
+    if not _has_short_flag(argv, "N"):
         return []
-    return ["-D", os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)]
+    extra: List[str] = []
+    if not _has_dynamic_forward(argv):
+        extra += ["-D", os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)]
+    if not _has_o_option(argv, "exitonforwardfailure"):
+        # Without this, ssh backgrounds successfully after a bind failure and
+        # leaves an unusable orphan master behind. The caller then sees exit 0
+        # even though no SOCKS listener exists.
+        extra += ["-o", "ExitOnForwardFailure=yes"]
+    return extra
 
 
 def _uses_master_control(argv: List[str]) -> bool:
@@ -621,28 +643,188 @@ def run_wrapper(argv: List[str]) -> int:
     return subprocess.call(cmd, env=env)
 
 
+def _socks_address(socks: str) -> Tuple[str, int]:
+    host, separator, port = socks.rpartition(":")
+    if not separator or not port:
+        raise ValueError(f"invalid SSH_OTP_SOCKS address: {socks!r}")
+    return host or "127.0.0.1", int(port)
+
+
+def _connect_socks(socks: str, timeout: float = SOCKS_CONNECT_TIMEOUT_SECONDS):
+    connection = socket.create_connection(_socks_address(socks), timeout=timeout)
+    # create_connection leaves the timeout on the returned socket. That is
+    # useful for the readiness probe but fatal for the long-lived ProxyCommand
+    # relay: a quiet 0.5 s interval would otherwise tear down a healthy SSH
+    # session. Restore normal blocking mode before handing the socket over.
+    settimeout = getattr(connection, "settimeout", None)
+    if settimeout:
+        settimeout(None)
+    return connection
+
+
+def _socks_start_lock_path(socks: str) -> str:
+    state_dir = os.environ.get("SSH_TOTP_STATE_DIR", "")
+    if not state_dir:
+        state_dir = os.path.join(tempfile.gettempdir(), "codex-ssh-totp")
+    os.makedirs(state_dir, exist_ok=True)
+    key = hashlib.sha256(socks.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(state_dir, f"socks-start-{key}.lock")
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if _is_windows():
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information, False, pid
+        )
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _socks_start_lock_is_stale(lock_path: str) -> bool:
+    try:
+        stat = os.stat(lock_path)
+        with open(lock_path, "r", encoding="ascii") as handle:
+            owner = handle.read().strip()
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError):
+        return time.time() - stat.st_mtime > SOCKS_START_STALE_LOCK_SECONDS
+    try:
+        pid = int(owner.split(":", 1)[0])
+    except (TypeError, ValueError):
+        return time.time() - stat.st_mtime > SOCKS_START_STALE_LOCK_SECONDS
+    return (
+        not _process_is_alive(pid)
+        or time.time() - stat.st_mtime > SOCKS_START_STALE_LOCK_SECONDS
+    )
+
+
+def _acquire_socks_start_lock(socks: str) -> Tuple[int, str, str]:
+    lock_path = _socks_start_lock_path(socks)
+    deadline = time.monotonic() + SOCKS_START_LOCK_TIMEOUT_SECONDS
+    token = f"{os.getpid()}:{time.time_ns()}"
+    while True:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            os.write(lock_fd, token.encode("ascii"))
+            os.fsync(lock_fd)
+            return lock_fd, lock_path, token
+        except FileExistsError:
+            if _socks_start_lock_is_stale(lock_path):
+                try:
+                    os.unlink(lock_path)
+                except FileNotFoundError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting to start gateway SOCKS {socks}")
+            time.sleep(SOCKS_START_POLL_SECONDS)
+
+
+def _release_socks_start_lock(lock_fd: int, lock_path: str, token: str) -> None:
+    os.close(lock_fd)
+    try:
+        with open(lock_path, "r", encoding="ascii") as handle:
+            current = handle.read().strip()
+        if current == token:
+            os.unlink(lock_path)
+    except FileNotFoundError:
+        pass
+
+
+def _socks_auto_start_enabled() -> bool:
+    value = os.environ.get("SSH_TOTP_AUTO_START", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _ensure_socks_connection(socks: str):
+    """Return a live SOCKS socket, starting the OTP gateway master if needed."""
+    try:
+        return _connect_socks(socks)
+    except OSError as initial_error:
+        if not _socks_auto_start_enabled():
+            raise RuntimeError(
+                f"gateway SOCKS {socks} is unavailable and SSH_TOTP_AUTO_START is disabled"
+            ) from initial_error
+
+    lock_fd, lock_path, token = _acquire_socks_start_lock(socks)
+    try:
+        try:
+            return _connect_socks(socks)
+        except OSError:
+            pass
+
+        jump_alias = default_jump_alias()
+        start_argv = ["-MNf", "-D", socks, jump_alias]
+        result = run_wrapper(start_argv)
+        if result != 0:
+            raise RuntimeError(
+                f"automatic gateway start failed for {jump_alias} with exit code {result}"
+            )
+
+        deadline = time.monotonic() + SOCKS_START_READY_TIMEOUT_SECONDS
+        last_error = None
+        while True:
+            try:
+                return _connect_socks(socks)
+            except OSError as exc:
+                last_error = exc
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"gateway {jump_alias} started but SOCKS {socks} did not become ready: {last_error}"
+                ) from last_error
+            time.sleep(SOCKS_START_POLL_SECONDS)
+    finally:
+        _release_socks_start_lock(lock_fd, lock_path, token)
+
+
+def _log_socks_relay(message: str) -> None:
+    log_path = os.environ.get("SSH_TOTP_SOCKS_LOG", "")
+    if not log_path:
+        return
+    try:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {message}\n")
+    except OSError:
+        pass
+
+
 def _socks_relay(host: str, port: str) -> int:
     """ProxyCommand: relay stdio to host:port through the gateway SOCKS proxy.
 
-    The gateway master (opened by ``otp-up X``) exposes a SOCKS5 port via ``-D``.
+    The gateway master (auto-started on demand, or opened by ``otp-up x``)
+    exposes a SOCKS5 port via ``-D``.
     Jump hosts tunnel through it -- this avoids ssh's ``-W`` stdio-forward, which
     the Windows git/msys ssh master cannot service (``mux_client_request_stdio_fwd:
     read from master failed``). Works uniformly on every platform.
     """
-    import socket
     import struct
     import threading
 
-    socks = os.environ.get("SSH_OTP_SOCKS", "127.0.0.1:7070")
-    shost, _, sport = socks.rpartition(":")
+    socks = os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)
     try:
-        sock = socket.create_connection((shost or "127.0.0.1", int(sport)), timeout=10)
-    except OSError as exc:
+        sock = _ensure_socks_connection(socks)
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         sys.stderr.write(
-            f"sshotp --socks: cannot reach gateway SOCKS {socks} ({exc}). "
-            f"Run 'otp-up X' first.\n"
+            f"sshotp --socks: cannot prepare gateway SOCKS {socks} ({exc}). "
+            f"Manual fallback: 'otp-up {default_jump_alias()}'.\n"
         )
         return 1
+    _log_socks_relay(f"connected socks={socks} target={host}:{port}")
 
     hb = host.encode("idna") if any(ord(c) > 127 for c in host) else host.encode()
     sock.sendall(b"\x05\x01\x00")
@@ -662,6 +844,7 @@ def _socks_relay(host: str, port: str) -> int:
         sock.recv(sock.recv(1)[0] + 2)
     elif atyp == 0x04:
         sock.recv(16 + 2)
+    _log_socks_relay("handshake-complete")
 
     in_fd = sys.stdin.fileno()
     out_fd = sys.stdout.fileno()
@@ -672,21 +855,25 @@ def _socks_relay(host: str, port: str) -> int:
         except OSError:
             return
         sys.stdout = None
+        _log_socks_relay("stdout-closed")
 
     def pump_stdin() -> None:
         try:
             while True:
                 data = os.read(in_fd, 65536)
                 if not data:
+                    _log_socks_relay("stdin-eof")
                     break
+                _log_socks_relay(f"stdin-read bytes={len(data)}")
                 sock.sendall(data)
-        except OSError:
-            pass
+        except OSError as exc:
+            _log_socks_relay(f"stdin-error error={exc!r}")
         finally:
             try:
                 sock.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
+                _log_socks_relay("socket-shutdown-write")
+            except OSError as exc:
+                _log_socks_relay(f"socket-shutdown-write-error error={exc!r}")
 
     stdin_thread = threading.Thread(target=pump_stdin, daemon=True)
     stdin_thread.start()
@@ -694,17 +881,21 @@ def _socks_relay(host: str, port: str) -> int:
         while True:
             data = sock.recv(65536)
             if not data:
+                _log_socks_relay("socket-eof")
                 break
-            os.write(out_fd, data)
-    except OSError:
-        pass
+            written = os.write(out_fd, data)
+            _log_socks_relay(f"socket-read bytes={len(data)} stdout-write={written}")
+    except OSError as exc:
+        _log_socks_relay(f"socket-or-stdout-error error={exc!r}")
     finally:
         close_stdout_pipe()
         stdin_thread.join(SOCKS_CLIENT_DRAIN_GRACE_SECONDS)
+        _log_socks_relay(f"stdin-thread-alive={stdin_thread.is_alive()}")
         try:
             sock.close()
-        except OSError:
-            pass
+            _log_socks_relay("socket-closed")
+        except OSError as exc:
+            _log_socks_relay(f"socket-close-error error={exc!r}")
     return 0
 
 

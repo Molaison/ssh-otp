@@ -1,6 +1,7 @@
 @echo off
-if defined SSH_TOTP_PYTHON (
-  "%SSH_TOTP_PYTHON%" "%~dp0totp_askpass.py" %*
-) else (
-  "C:\Users\ADMIN\scoop\apps\miniconda3\current\python.exe" "%~dp0totp_askpass.py" %*
-)
+setlocal EnableExtensions
+set "DIR=%~dp0"
+if not defined SSH_TOTP_PYTHON call "%DIR%find_python.cmd"
+if errorlevel 1 exit /b %errorlevel%
+"%SSH_TOTP_PYTHON%" "%DIR%totp_askpass.py" %*
+exit /b %errorlevel%
