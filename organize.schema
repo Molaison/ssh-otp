@@ -1,9 +1,13 @@
 # organize.schema -- repository layout
-# Last updated: 2026-07-07
+# Last updated: 2026-07-15
 
+.codex-tasks/        # Taskmaster execution records (ignored by git).
 bin/                 # POSIX ssh shim.
 lib/                 # Shared client/config compatibility modules.
 examples/            # Sanitized config snippets for reuse on other machines.
+configure_ssh.py      # Cross-platform idempotent SSH config generator.
+configure / configure.cmd  # POSIX and Windows configuration launchers.
+find_python.cmd       # Shared portable Python discovery for Windows launchers.
 ssh_totp.py          # Core wrapper and SOCKS relay.
 totp_askpass.py      # TOTP askpass helper.
 sshotp               # POSIX launcher.
@@ -11,4 +15,4 @@ sshotp.cmd           # Windows launcher.
 install.sh           # POSIX installer.
 install.ps1          # Windows PowerShell installer.
 test_ssh_totp_regression.py  # Regression tests.
-
+test_installers.py    # Installer and generated-config portability tests.

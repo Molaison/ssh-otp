@@ -9,7 +9,7 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 askpass="$script_dir/totp_askpass.py"
 config_file="${SSH_TOTP_CONFIG:-$HOME/.ssh/config}"
-jump_alias="${SSH_TOTP_JUMP_ALIAS:-X}"
+jump_alias="${SSH_TOTP_JUMP_ALIAS:-x}"
 real_ssh="${SSH_TOTP_REAL_SSH:-}"
 
 if [ -z "$real_ssh" ]; then

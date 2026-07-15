@@ -1,11 +1,7 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 set "SCRIPT_DIR=%~dp0"
-
-if defined SSH_TOTP_PYTHON (
-  "%SSH_TOTP_PYTHON%" "%SCRIPT_DIR%debug_proxy_win.py" %*
-  exit /b %ERRORLEVEL%
-)
-
-"C:\Users\ADMIN\scoop\apps\miniconda3\current\python.exe" "%SCRIPT_DIR%debug_proxy_win.py" %*
-exit /b %ERRORLEVEL%
+if not defined SSH_TOTP_PYTHON call "%SCRIPT_DIR%find_python.cmd"
+if errorlevel 1 exit /b %errorlevel%
+"%SSH_TOTP_PYTHON%" "%SCRIPT_DIR%debug_proxy_win.py" %*
+exit /b %errorlevel%

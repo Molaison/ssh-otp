@@ -1,95 +1,133 @@
 # ssh-otp
 
-Reusable OpenSSH OTP helper for hosts that require TOTP through keyboard-interactive auth.
+Reusable OpenSSH wrapper for hosts that require a key plus a TOTP
+keyboard-interactive challenge. It supports Windows, macOS, Linux, and Termux.
 
 ## What It Provides
 
 - Direct OTP aliases such as `X` and `x`.
-- A gateway master opened by `otp-up X`.
-- A local SOCKS listener, default `127.0.0.1:7070`, for hosts behind the gateway.
-- Transparent handling for ordinary hosts.
-- Windows and POSIX launchers.
+- On-demand startup of the default `x` gateway master.
+- One local SOCKS listener (default `127.0.0.1:7070`) reused for about eight hours.
+- Cross-process startup locking so concurrent IDE, Git, and terminal probes issue one OTP.
+- Transparent behavior for hosts without TOTP metadata.
+- Idempotent shell, PowerShell, Git, and SSH-config setup.
+
+| Platform | Installer | SSH launcher | Automatic integration |
+| --- | --- | --- | --- |
+| Windows | `install.ps1` | `sshotp.cmd` | PowerShell profile, Python path, Git |
+| macOS | `install.sh` | `sshotp` | zsh profile, `~/.local/bin/ssh`, Git |
+| Linux | `install.sh` | `sshotp` | bash/profile, `~/.local/bin/ssh`, Git |
+| Termux | `install.sh` | `sshotp` | bash/profile, `~/.local/bin/ssh`, Git |
+
+## Requirements
+
+- Python 3
+- OpenSSH client
+- Git (optional, but automatically configured when installed)
+
+Termux users can install them with:
+
+```sh
+pkg install python openssh git
+```
 
 ## Install
 
 Windows PowerShell:
 
 ```powershell
-git clone <repo-url> $HOME\.ssh\ssh_otp
-pwsh -NoProfile -File $HOME\.ssh\ssh_otp\install.ps1
+git clone https://github.com/Molaison/ssh-otp.git "$HOME\.ssh\ssh_otp"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$HOME\.ssh\ssh_otp\install.ps1"
 ```
 
-POSIX shells:
+macOS, Linux, and Termux:
 
 ```sh
-git clone <repo-url> ~/.ssh/ssh_otp
+git clone https://github.com/Molaison/ssh-otp.git ~/.ssh/ssh_otp
 sh ~/.ssh/ssh_otp/install.sh
 ```
 
-## Configure
+Both installers are idempotent. They discover Python automatically, put the
+wrapper on the shell path, install the `otp-*` helpers, and set Git's global
+`core.sshCommand`. Use `-SkipGitConfig` on Windows or
+`SSH_TOTP_SKIP_GIT=1` on POSIX to leave Git unchanged.
 
-Copy the relevant blocks from `examples/ssh_config.example` into `~/.ssh/config`.
-Replace host names, users, key paths, and `totp_secret` values.
+VS Code uses JSON-with-comments, so its setting is intentionally not rewritten.
+Set `remote.SSH.path` to `sshotp.cmd` on Windows or `sshotp` on POSIX if needed.
 
-The direct OTP aliases are ordinary `Host` blocks with metadata comments:
+## Configure Without Editing SSH Config
 
-```sshconfig
-# totp_secret: BASE32SECRET
-# totp_prompt: verification|otp|code
-# totp_master: yes
-Host X
-    HostName gateway.example.com
-    User user
-    Port 50001
-    IdentityFile ~/.ssh/id_rsa
+The configurator asks for the TOTP secret with hidden input, validates it, and
+creates or replaces one marked block at the top of `~/.ssh/config`. Existing
+unmanaged host entries are preserved. Changed configs are backed up before an
+atomic replacement; POSIX permissions are set to `0600`.
 
-# totp_secret: BASE32SECRET
-# totp_prompt: verification|otp|code
-Host x
-    HostName 192.168.1.10
-    User user
-    IdentityFile ~/.ssh/id_rsa
+Windows:
+
+```powershell
+& "$HOME\.ssh\ssh_otp\configure.cmd" `
+  --jump-host gateway.example.com `
+  --jump-user alice `
+  --jump-port 22 `
+  --identity-file ~/.ssh/id_rsa `
+  --proxy "compute=compute.internal,alice,22"
 ```
 
-Hosts behind `X` use the SOCKS relay:
+macOS, Linux, or Termux:
 
-```sshconfig
-Host f101
-    HostName f101.internal.example.com
-    User user
-    ProxyCommand C:/Users/YOU/.ssh/ssh_otp/sshotp.cmd --socks %h %p
+```sh
+~/.ssh/ssh_otp/configure \
+  --jump-host gateway.example.com \
+  --jump-user alice \
+  --jump-port 22 \
+  --identity-file ~/.ssh/id_rsa \
+  --proxy 'compute=compute.internal,alice,22'
 ```
 
-For POSIX machines use:
+Repeat `--proxy ALIAS=HOST[,USER[,PORT]]` for additional nodes. The jump alias
+defaults to lowercase `x`; use `--jump-alias` or `SSH_TOTP_JUMP_ALIAS` to
+override it. `--platform auto` selects `sshotp.cmd` on Windows and `sshotp` on
+POSIX. Use `--dry-run` to preview a redacted generated block.
 
-```sshconfig
-    ProxyCommand ~/.ssh/ssh_otp/sshotp --socks %h %p
-```
+For unattended configuration, put the Base32 secret in `SSH_TOTP_SECRET` and
+add `--non-interactive`. Do not pass the secret as a command-line argument or
+commit the generated SSH config.
+
+A sanitized manual configuration remains available in
+`examples/ssh_config.example`.
 
 ## Use
 
-Start the gateway master:
+Connect normally. If the SOCKS listener is absent, the first proxied connection
+starts the gateway master and answers its OTP automatically:
 
 ```sh
-otp-up X
-```
-
-Connect:
-
-```sh
-ssh X
 ssh x
-ssh f101
+ssh compute
 ```
 
-Stop the gateway master:
+Later connections reuse the same gateway. Manual controls remain available for
+prewarming and diagnostics:
 
 ```sh
-otp-down X
+otp-up x
+otp-status x
+otp-down x
 ```
+
+Useful overrides:
+
+- `SSH_TOTP_AUTO_START=0` disables on-demand master startup.
+- `SSH_TOTP_JUMP_ALIAS=X` selects another gateway alias.
+- `SSH_OTP_SOCKS=127.0.0.1:7071` changes the listener.
+- `SSH_TOTP_PYTHON=/path/to/python3` pins the interpreter.
+- `SSH_TOTP_SOCKS_LOG=/path/to/log` enables payload-free relay diagnostics.
 
 ## Test
 
 ```sh
-python ~/.ssh/ssh_otp/test_ssh_totp_regression.py
+python3 test_ssh_totp_regression.py
+python3 test_installers.py
 ```
+
+On Windows, `python` or the Python launcher may be used instead of `python3`.

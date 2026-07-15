@@ -2,7 +2,6 @@
 # Replace BASE32SECRET, host, user, port, and key path.
 # totp_secret: BASE32SECRET
 # totp_prompt: verification|verify|otp|2fa|two[- ]factor|authenticator|one[- ]time password|oath|code
-# totp_master: yes
 Host X
     HostName gateway.example.com
     User user
@@ -12,6 +11,7 @@ Host X
 # Direct OTP host.
 # totp_secret: BASE32SECRET
 # totp_prompt: verification|verify|otp|2fa|two[- ]factor|authenticator|one[- ]time password|oath|code
+# totp_master: yes
 Host x
     HostName 192.168.1.10
     User user
@@ -20,13 +20,13 @@ Host x
     KbdInteractiveAuthentication yes
     NumberOfPasswordPrompts 3
 
-# Windows SOCKS-backed node behind X.
+# Windows SOCKS-backed node behind x.
 Host f101-windows
     HostName f101.internal.example.com
     User user
     ProxyCommand C:/Users/YOU/.ssh/ssh_otp/sshotp.cmd --socks %h %p
 
-# POSIX SOCKS-backed node behind X.
+# POSIX SOCKS-backed node behind x.
 Host f101-posix
     HostName f101.internal.example.com
     User user

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+py="${SSH_TOTP_PYTHON:-}"
+if [ -z "$py" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then py="$candidate"; break; fi
+  done
+fi
+[ -n "$py" ] || { echo "ssh-otp: Python 3 was not found. Install Python or set SSH_TOTP_PYTHON." >&2; exit 127; }
+exec "$py" "$dir/configure_ssh.py" "$@"
