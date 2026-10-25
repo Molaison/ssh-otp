@@ -42,7 +42,7 @@ class ConfigureSSHTests(unittest.TestCase):
                 "--jump-host", "gateway.example.com",
                 "--jump-user", "alice",
                 "--jump-port", "50001",
-                "--proxy", "compute=compute.internal,alice,2222",
+                "--host", "compute=compute.internal,alice,2222",
             ]
 
             first, first_out, first_err = self.run_configure(args)
@@ -74,7 +74,7 @@ class ConfigureSSHTests(unittest.TestCase):
                 "--platform", "posix",
                 "--jump-host", "gateway.example.com",
                 "--jump-user", "alice",
-                "--proxy", "compute=compute.internal",
+                "--host", "compute=compute.internal",
             ])
             self.assertEqual(result, 0, error)
             content = config.read_text(encoding="utf-8")
@@ -107,8 +107,8 @@ class ConfigureSSHTests(unittest.TestCase):
                 "--platform", "posix",
                 "--jump-host", "internal.example.com",
                 "--jump-user", "alice",
-                "--gateway", "X=public.example.com,alice,50001",
-                "--proxy", "compute=compute.internal,alice,22@X",
+                "--base", "X=public.example.com,alice,50001",
+                "--host", "compute=compute.internal,alice,22@X",
             ]
             first, out, err = self.run_configure(args)
             self.assertEqual(first, 0, err)
@@ -125,7 +125,7 @@ class ConfigureSSHTests(unittest.TestCase):
             self.assertIn("unchanged", out2)
             self.assertEqual(config.read_text(encoding="utf-8"), content)
 
-    def test_proxy_with_unknown_gateway_is_rejected(self):
+    def test_host_with_unknown_base_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config = root / "config"
@@ -133,13 +133,13 @@ class ConfigureSSHTests(unittest.TestCase):
                 "--config", str(config),
                 "--jump-host", "gateway.example.com",
                 "--jump-user", "alice",
-                "--proxy", "compute=compute.internal@missing",
+                "--host", "compute=compute.internal@missing",
             ])
             self.assertEqual(result, 2)
-            self.assertIn("unknown gateway", error)
+            self.assertIn("unknown base", error)
             self.assertFalse(config.exists())
 
-    def test_proxy_alias_that_already_exists_warns_about_shadowing(self):
+    def test_host_alias_that_already_exists_warns_about_shadowing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config = root / "config"
@@ -150,7 +150,7 @@ class ConfigureSSHTests(unittest.TestCase):
                 "--config", str(config),
                 "--jump-host", "gateway.example.com",
                 "--jump-user", "alice",
-                "--proxy", "compute=compute.internal",
+                "--host", "compute=compute.internal",
             ])
             self.assertEqual(result, 0, error)
             self.assertIn("already exist outside the managed block", error)

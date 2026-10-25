@@ -41,12 +41,14 @@ class Gateway:
 
 
 @dataclass(frozen=True)
-class ProxyHost:
+class HostEntry:
+    """A host reached through one of the base entry points."""
+
     alias: str
     hostname: str
     user: str = ""
     port: Optional[int] = None
-    gateway: str = ""
+    base: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,7 @@ class ConfigureOptions:
     totp_prompt: str
     platform: str
     wrapper_dir: Path
-    proxies: Sequence[ProxyHost]
+    hosts: Sequence[HostEntry]
     identity_file: str = "~/.ssh/id_rsa"
     backup: bool = True
 
@@ -116,46 +118,46 @@ def normalize_totp_secret(secret: str) -> str:
     return normalized
 
 
-def parse_gateway(value: str) -> Gateway:
+def parse_base(value: str) -> Gateway:
     """Parse ALIAS=HOST[,USER[,PORT[,IDENTITY]]]."""
     alias, separator, remainder = value.partition("=")
     if not separator:
-        raise ValueError("gateway must use ALIAS=HOST[,USER[,PORT[,IDENTITY]]]")
+        raise ValueError("base must use ALIAS=HOST[,USER[,PORT[,IDENTITY]]]")
     parts = [part.strip() for part in remainder.split(",")]
     if not 1 <= len(parts) <= 4 or not parts[0]:
-        raise ValueError("gateway must use ALIAS=HOST[,USER[,PORT[,IDENTITY]]]")
-    user = _single_line(parts[1], "gateway user") if len(parts) >= 2 and parts[1] else ""
-    port = _port(int(parts[2]), "gateway port") if len(parts) >= 3 and parts[2] else 22
-    identity = _single_line(parts[3], "gateway identity") if len(parts) == 4 and parts[3] else ""
+        raise ValueError("base must use ALIAS=HOST[,USER[,PORT[,IDENTITY]]]")
+    user = _single_line(parts[1], "base user") if len(parts) >= 2 and parts[1] else ""
+    port = _port(int(parts[2]), "base port") if len(parts) >= 3 and parts[2] else 22
+    identity = _single_line(parts[3], "base identity") if len(parts) == 4 and parts[3] else ""
     return Gateway(
-        alias=_alias(alias, "gateway alias"),
-        hostname=_single_line(parts[0], "gateway hostname"),
+        alias=_alias(alias, "base alias"),
+        hostname=_single_line(parts[0], "base hostname"),
         user=user,
         port=port,
         identity_file=identity,
     )
 
 
-def parse_proxy(value: str) -> ProxyHost:
-    """Parse ALIAS=HOST[,USER[,PORT]][@GATEWAY]."""
+def parse_host(value: str) -> HostEntry:
+    """Parse ALIAS=HOST[,USER[,PORT]][@BASE]."""
     alias, separator, remainder = value.partition("=")
     if not separator:
-        raise ValueError("proxy must use ALIAS=HOST[,USER[,PORT]][@GATEWAY]")
-    gateway = ""
+        raise ValueError("host must use ALIAS=HOST[,USER[,PORT]][@BASE]")
+    base = ""
     if "@" in remainder:
-        remainder, _, gateway = remainder.rpartition("@")
-        gateway = _alias(gateway, "proxy gateway")
+        remainder, _, base = remainder.rpartition("@")
+        base = _alias(base, "host base")
     parts = [part.strip() for part in remainder.split(",")]
     if not 1 <= len(parts) <= 3 or not parts[0]:
-        raise ValueError("proxy must use ALIAS=HOST[,USER[,PORT]]")
-    user = _single_line(parts[1], "proxy user") if len(parts) >= 2 and parts[1] else ""
-    port = _port(int(parts[2]), "proxy port") if len(parts) == 3 and parts[2] else None
-    return ProxyHost(
-        alias=_alias(alias, "proxy alias"),
-        hostname=_single_line(parts[0], "proxy hostname"),
+        raise ValueError("host must use ALIAS=HOST[,USER[,PORT]]")
+    user = _single_line(parts[1], "host user") if len(parts) >= 2 and parts[1] else ""
+    port = _port(int(parts[2]), "host port") if len(parts) == 3 and parts[2] else None
+    return HostEntry(
+        alias=_alias(alias, "host alias"),
+        hostname=_single_line(parts[0], "host hostname"),
         user=user,
         port=port,
-        gateway=gateway,
+        base=base,
     )
 
 
@@ -182,16 +184,16 @@ def build_managed_block(options: ConfigureOptions, secret: str) -> str:
     secret = normalize_totp_secret(secret)
     gateways = [
         Gateway(
-            alias=_alias(gateway.alias, "gateway alias"),
-            hostname=_single_line(gateway.hostname, "gateway hostname"),
-            user=_single_line(gateway.user, "gateway user"),
-            port=_port(gateway.port, "gateway port"),
+            alias=_alias(gateway.alias, "base alias"),
+            hostname=_single_line(gateway.hostname, "base hostname"),
+            user=_single_line(gateway.user, "base user"),
+            port=_port(gateway.port, "base port"),
             identity_file=gateway.identity_file,
         )
         for gateway in options.gateways
     ]
     if not gateways:
-        raise ValueError("at least one gateway is required")
+        raise ValueError("at least one --base entry point is required")
     primary = gateways[0]
 
     lines = [
@@ -228,25 +230,25 @@ def build_managed_block(options: ConfigureOptions, secret: str) -> str:
             ]
         )
 
-    gateway_aliases = {gateway.alias for gateway in gateways}
-    proxy_aliases = set()
-    for proxy in options.proxies:
-        alias = _alias(proxy.alias, "proxy alias")
-        if alias in gateway_aliases:
-            raise ValueError(f"proxy alias duplicates a gateway alias: {alias}")
-        if alias in proxy_aliases:
-            raise ValueError(f"duplicate proxy alias: {alias}")
-        proxy_aliases.add(alias)
-        gateway = proxy.gateway or primary.alias
-        if gateway not in gateway_aliases:
-            raise ValueError(f"proxy {alias} uses unknown gateway: {gateway}")
+    base_aliases = {gateway.alias for gateway in gateways}
+    host_aliases = set()
+    for entry in options.hosts:
+        alias = _alias(entry.alias, "host alias")
+        if alias in base_aliases:
+            raise ValueError(f"host alias duplicates a base alias: {alias}")
+        if alias in host_aliases:
+            raise ValueError(f"duplicate host alias: {alias}")
+        host_aliases.add(alias)
+        base = entry.base or primary.alias
+        if base not in base_aliases:
+            raise ValueError(f"host {alias} uses unknown base: {base}")
         lines.extend(["", f"Host {alias}"])
-        lines.append(f"    HostName {_single_line(proxy.hostname, 'proxy hostname')}")
-        if proxy.user:
-            lines.append(f"    User {_single_line(proxy.user, 'proxy user')}")
-        if proxy.port is not None:
-            lines.append(f"    Port {_port(proxy.port, 'proxy port')}")
-        lines.append(f"    ProxyCommand {_proxy_command(options, gateway)}")
+        lines.append(f"    HostName {_single_line(entry.hostname, 'host hostname')}")
+        if entry.user:
+            lines.append(f"    User {_single_line(entry.user, 'host user')}")
+        if entry.port is not None:
+            lines.append(f"    Port {_port(entry.port, 'host port')}")
+        lines.append(f"    ProxyCommand {_proxy_command(options, base)}")
     lines.append(BLOCK_END)
     return "\n".join(lines) + "\n"
 
@@ -291,7 +293,7 @@ def update_ssh_config(options: ConfigureOptions, secret: str) -> ConfigureResult
     updated = _replace_managed_block(existing, block)
     aliases = [
         *(gateway.alias for gateway in options.gateways),
-        *(proxy.alias for proxy in options.proxies),
+        *(entry.alias for entry in options.hosts),
     ]
     shadowed = sorted(set(aliases) & existing_host_aliases(existing))
     if updated == existing:
@@ -344,17 +346,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jump-port", type=int, default=22)
     parser.add_argument("--identity-file", default="~/.ssh/id_rsa")
     parser.add_argument(
-        "--gateway",
+        "--base",
         action="append",
         default=[],
         metavar="ALIAS=HOST[,USER[,PORT[,IDENTITY]]]",
-        help="Additional entry point for the same cluster (repeatable)",
+        help="Entry point for the cluster, e.g. x or X (repeatable)",
     )
     parser.add_argument(
-        "--proxy",
+        "--host",
         action="append",
         default=[],
-        metavar="ALIAS=HOST[,USER[,PORT]][@GATEWAY]",
+        metavar="ALIAS=HOST[,USER[,PORT]][@BASE]",
+        help="Host reached through a base entry point (repeatable)",
     )
     parser.add_argument("--config", default=str(Path.home() / ".ssh" / "config"))
     parser.add_argument("--wrapper-dir", default=str(SCRIPT_DIR))
@@ -381,15 +384,13 @@ def _gateways_from_args(args: argparse.Namespace) -> List[Gateway]:
                 identity_file=args.identity_file,
             )
         )
-    elif args.jump_alias == "x" and not args.gateway:
-        raise ValueError("provide --jump-host/--jump-user or at least one --jump")
-    gateways.extend(parse_gateway(value) for value in args.gateway)
+    gateways.extend(parse_base(value) for value in args.base)
     if not gateways:
-        raise ValueError("provide --jump-host/--jump-user or at least one --jump")
+        raise ValueError("provide --base ALIAS=HOST,... (or --jump-host/--jump-user)")
     seen = set()
     for gateway in gateways:
         if gateway.alias in seen:
-            raise ValueError(f"duplicate gateway alias: {gateway.alias}")
+            raise ValueError(f"duplicate base alias: {gateway.alias}")
         seen.add(gateway.alias)
     return gateways
 
@@ -401,7 +402,7 @@ def _options_from_args(args: argparse.Namespace) -> ConfigureOptions:
         totp_prompt=args.totp_prompt,
         platform=_platform_name(args.platform),
         wrapper_dir=Path(args.wrapper_dir),
-        proxies=[parse_proxy(value) for value in args.proxy],
+        hosts=[parse_host(value) for value in args.host],
         identity_file=args.identity_file,
         backup=not args.no_backup,
     )

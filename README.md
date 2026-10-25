@@ -20,22 +20,25 @@ keyboard-interactive challenge. It supports Windows, macOS, Linux, and Termux.
 git clone https://github.com/Molaison/ssh-otp.git ~/.ssh/ssh_otp
 sh ~/.ssh/ssh_otp/install.sh
 ~/.ssh/ssh_otp/configure \
-  --jump-host gateway.example.com \
-  --jump-user alice \
-  --identity-file ~/.ssh/id_rsa \
-  --proxy 'compute=compute.internal,alice,22'
+  --base x=10.10.1.100,alice,22 \
+  --base X=public.example.com,alice,50001 \
+  --host f101=10.10.1.101,alice@x \
+  --host f103=10.10.1.103,alice@X
 ```
 
-That is the whole setup: `install.sh` never touches `~/.ssh/config`, and `configure`
-writes one managed block that the wrapper can drive on its own. Plain `ssh x` opens an
-interactive session on the gateway (no remote command needed); the first code is reused
-for the next eight hours. `ssh compute` then tunnels through the gateway's SOCKS
-listener, and `otp-up` / `otp-status` / `otp-down` default to the gateway recorded there.
+`--base` is an entry point of the cluster (`x` internal, `X` public); `--host` is a
+machine reached through one of them, with `@BASE` choosing the entry (the first base
+is the default). One managed block keeps everything, so re-running the same command
+updates in place and never drops an entry.
 
-`--proxy` is only for hosts you reach *through* the gateway. Do not add it for a host
-that is already directly reachable: the managed block sits first in the file, so it
-would shadow your own entry. `configure` warns when a `--proxy` alias already exists
-outside the block.
+Plain `ssh x` opens an interactive session on that entry point (no remote command
+needed); the first code is reused for the next eight hours. `ssh f101` then tunnels
+through its base. Each base owns a SOCKS listener (`7070`, `7071`, ... in config
+order) so several entries can run side by side, and `otp-up` / `otp-status` /
+`otp-down` default to the first base (pass `X` to control another one).
+
+The older `--jump-host` / `--jump-user` / `--jump-alias` / `--jump-port` flags still
+work and describe the first base.
 
 | Platform | Installer | SSH launcher | Automatic integration |
 | --- | --- | --- | --- |
@@ -113,17 +116,12 @@ A cluster with two entry points keeps both in the same managed block:
 
 ```sh
 ~/.ssh/ssh_otp/configure \
-  --jump-host 10.10.1.100 --jump-user alice \
-  --gateway 'X=public.example.com,alice,50001' \
-  --proxy 'compute=compute.internal,alice,22@X'
+  --base x=10.10.1.100,alice,22 \
+  --base X=public.example.com,alice,50001 \
+  --host compute=compute.internal,alice,22@X
 ```
 
-Each `--gateway ALIAS=HOST[,USER[,PORT[,IDENTITY]]]` is an entry point, every one keeps
-its own SOCKS listener (`7070`, `7071`, ... in config order), `@ALIAS` selects the
-entry a proxied host tunnels through, and `ssh x` / `ssh X` pick the entry directly.
-Re-running the command updates that one block, so no entry is dropped.
-
-Repeat `--proxy ALIAS=HOST[,USER[,PORT]][@GATEWAY]` for additional nodes. The jump alias
+Repeat `--host ALIAS=HOST[,USER[,PORT]][@BASE]` for additional nodes. The jump alias
 defaults to lowercase `x`; use `--jump-alias` or `SSH_TOTP_JUMP_ALIAS` to
 override it. The alias is written into the block as `# totp_gateway:` and into
 each `ProxyCommand`, so automatic startup follows it without any extra
