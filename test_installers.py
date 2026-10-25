@@ -82,6 +82,21 @@ class ConfigureSSHTests(unittest.TestCase):
             self.assertNotIn("sshotp.cmd", content)
             self.assertNotIn(VALID_SECRET, output)
 
+    def test_multiline_secret_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "config"
+            result, output, error = self.run_configure(
+                [
+                    "--config", str(config),
+                    "--jump-host", "gateway.example.com",
+                    "--jump-user", "alice",
+                ],
+                secret=f"{VALID_SECRET}\n{VALID_SECRET}",
+            )
+            self.assertEqual(result, 2)
+            self.assertIn("single line", error)
+            self.assertFalse(config.exists())
+
     def test_proxy_alias_that_already_exists_warns_about_shadowing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

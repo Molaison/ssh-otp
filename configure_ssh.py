@@ -83,7 +83,12 @@ def _port(value: int, label: str = "port") -> int:
 
 
 def normalize_totp_secret(secret: str) -> str:
-    normalized = re.sub(r"\s+", "", secret).upper().rstrip("=")
+    raw = secret.strip()
+    if "\n" in raw or "\r" in raw:
+        # A pasted block of lines (e.g. two secrets) would otherwise be merged
+        # into one long, silently wrong Base32 string.
+        raise ValueError("TOTP secret must be a single line")
+    normalized = re.sub(r"\s+", "", raw).upper().rstrip("=")
     if not normalized:
         raise ValueError("TOTP secret is empty")
     if not re.fullmatch(r"[A-Z2-7]+", normalized):
