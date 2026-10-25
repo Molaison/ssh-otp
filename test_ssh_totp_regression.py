@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import tempfile
@@ -346,7 +347,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertNotIn("ControlMaster", " ".join(ssh_totp.multiplex_args(["-M", "x"])))
         self.assertNotIn("ControlPath", " ".join(ssh_totp.multiplex_args(["-o", "ControlPath=/tmp/s", "x"])))
 
-    def test_run_wrapper_uses_askpass_without_multiplex_for_regular_master_command(self):
+    def test_run_wrapper_multiplexes_regular_master_command(self):
         calls = []
 
         def fake_resolve(args, config_path=None):
@@ -365,8 +366,9 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         joined = " ".join(argv)
         self.assertEqual(argv[0], "REAL-SSH")
         self.assertIn("batchmode=no", joined)
-        self.assertNotIn("ControlMaster", joined)
-        self.assertNotIn("ControlPath", joined)
+        self.assertIn("ControlMaster=auto", joined)
+        self.assertIn("ControlPath=", joined)
+        self.assertNotIn("-D", argv)
         self.assertEqual(env["SSH_TOTP_SECRET"], "SECRETLOWER")
         self.assertEqual(env["SSH_ASKPASS_REQUIRE"], "force")
         self.assertTrue(env["SSH_ASKPASS"].endswith(("totp_askpass.cmd", "totp_askpass.py")))
@@ -397,7 +399,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertIn("127.0.0.1:7070", argv)
         self.assertIn("ExitOnForwardFailure=yes", argv)
 
-    def test_run_wrapper_uses_askpass_without_multiplex_for_direct_non_master(self):
+    def test_run_wrapper_multiplexes_direct_non_master(self):
         calls = []
 
         def fake_resolve(args, config_path=None):
@@ -416,8 +418,8 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertEqual(argv[0], "REAL-SSH")
         joined = " ".join(argv)
         self.assertIn("batchmode=no", joined)
-        self.assertNotIn("ControlMaster", joined)
-        self.assertNotIn("ControlPath", joined)
+        self.assertIn("ControlMaster=auto", joined)
+        self.assertIn("ControlPath=", joined)
         self.assertEqual(env["SSH_TOTP_SECRET"], "SECRETLOWER")
 
     def test_proxycommand_socks_resolves_gateway_totp(self):
@@ -439,6 +441,90 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(ssh_totp.resolve_totp_for_args(["debug"], config)["alias"], "x")
+
+    def test_default_gateway_follows_totp_gateway_metadata(self):
+        config = self.write_config(
+            """
+            # totp_secret: SECRETLOWER
+            # totp_master: yes
+            # totp_gateway: gw
+            Host gw
+                HostName 10.0.0.1
+            Host plain
+                HostName 10.0.0.2
+                ProxyCommand /opt/ssh_otp/sshotp --socks %h %p
+            """
+        )
+        with self.patched_environ(SSH_TOTP_JUMP_ALIAS=None, SSH_TOTP_CONFIG=config):
+            self.assertEqual(ssh_totp.default_jump_alias(), "gw")
+            self.assertEqual(ssh_totp.resolve_totp_for_args(["plain"], config)["alias"], "gw")
+
+    def test_default_gateway_falls_back_to_master_metadata(self):
+        config = self.write_config(
+            """
+            # totp_secret: SECRETLOWER
+            # totp_master: yes
+            Host jump
+                HostName 10.0.0.1
+            """
+        )
+        with self.patched_environ(SSH_TOTP_JUMP_ALIAS=None):
+            self.assertEqual(ssh_totp.default_jump_alias(config), "jump")
+
+    def test_proxycommand_gateway_token_wins_over_default(self):
+        config = self.write_config(
+            """
+            # totp_secret: SECRETLOWER
+            Host x
+                HostName 10.0.0.1
+            # totp_secret: SECRETOTHER
+            # totp_master: yes
+            Host gw
+                HostName 10.0.0.9
+            Host node
+                HostName 10.0.0.2
+                ProxyCommand /opt/ssh_otp/sshotp --gateway gw --socks %h %p
+            """
+        )
+        with self.patched_environ(SSH_TOTP_JUMP_ALIAS=None):
+            self.assertEqual(ssh_totp.resolve_totp_for_args(["node"], config)["alias"], "gw")
+
+    def test_cli_default_jump_reports_config_gateway(self):
+        config = self.write_config(
+            """
+            # totp_secret: SECRETLOWER
+            # totp_master: yes
+            Host jump
+                HostName 10.0.0.1
+            """
+        )
+        buffer = io.StringIO()
+        original_stdout = sys.stdout
+        sys.stdout = buffer
+        try:
+            with self.patched_environ(SSH_TOTP_JUMP_ALIAS=None, SSH_TOTP_CONFIG=config):
+                self.assertEqual(ssh_totp.main(["--default-jump"]), 0)
+        finally:
+            sys.stdout = original_stdout
+        self.assertEqual(buffer.getvalue().strip(), "jump")
+
+    def test_run_detached_starts_master_without_inheriting_stdio(self):
+        calls = []
+
+        def fake_call(args, env, stdin=None, stdout=None, stderr=None):
+            calls.append((args, stdin, stdout, stderr))
+            return 0
+
+        with self.patched_attr(ssh_totp, "resolve_totp_for_args", lambda args, config_path=None: None):
+            with self.patched_attr(ssh_totp, "_real_ssh_executable", lambda: "REAL-SSH"):
+                with self.patched_attr(ssh_totp, "_plain_ssh_executable", lambda: "PLAIN-SSH"):
+                    with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                        self.assertEqual(ssh_totp._run_detached(["-MNf", "x"]), 0)
+
+        _args, stdin, stdout, stderr = calls[0]
+        self.assertIs(stdin, ssh_totp.subprocess.DEVNULL)
+        self.assertIs(stdout, ssh_totp.subprocess.DEVNULL)
+        self.assertIs(stderr, ssh_totp.subprocess.DEVNULL)
 
     def test_run_wrapper_leaves_non_totp_targets_transparent(self):
         calls = []
@@ -497,7 +583,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         starts = []
 
         with self.patched_attr(socket, "create_connection", lambda *_args, **_kwargs: fake_socket):
-            with self.patched_attr(ssh_totp, "run_wrapper", lambda argv: starts.append(argv) or 0):
+            with self.patched_attr(ssh_totp, "run_wrapper", lambda argv, stdio=None: starts.append(argv) or 0):
                 result = ssh_totp._ensure_socks_connection("127.0.0.1:7070")
 
         self.assertIs(result, fake_socket)
@@ -531,19 +617,59 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                 raise ConnectionRefusedError("listener absent")
             return fake_socket
 
-        def fake_run(argv):
+        def fake_run(argv, stdio=None):
+            if "-O" in argv and "check" in argv:
+                return 1  # no master yet
             starts.append(argv)
             started.set()
             return 0
 
         with tempfile.TemporaryDirectory() as state_dir:
-            with self.patched_environ(SSH_TOTP_STATE_DIR=state_dir, SSH_TOTP_JUMP_ALIAS=None):
+            absent_config = os.path.join(state_dir, "config")
+            with self.patched_environ(
+                SSH_TOTP_STATE_DIR=state_dir,
+                SSH_TOTP_JUMP_ALIAS=None,
+                SSH_TOTP_CONFIG=absent_config,
+            ):
                 with self.patched_attr(socket, "create_connection", fake_connect):
                     with self.patched_attr(ssh_totp, "run_wrapper", fake_run):
                         result = ssh_totp._ensure_socks_connection("127.0.0.1:7070")
 
         self.assertIs(result, fake_socket)
         self.assertEqual(starts, [["-MNf", "-D", "127.0.0.1:7070", "x"]])
+
+    def test_ensure_socks_connection_attaches_forward_to_running_master(self):
+        import socket
+
+        fake_socket = object()
+        calls = []
+        started = threading.Event()
+
+        def fake_connect(*_args, **_kwargs):
+            if started.is_set():
+                return fake_socket
+            raise ConnectionRefusedError("listener absent")
+
+        def fake_run(argv, stdio=None):
+            calls.append(argv)
+            if "check" in argv:
+                return 0  # a session master already serves the gateway
+            started.set()
+            return 0
+
+        with tempfile.TemporaryDirectory() as state_dir:
+            with self.patched_environ(
+                SSH_TOTP_STATE_DIR=state_dir,
+                SSH_TOTP_JUMP_ALIAS="gw",
+                SSH_TOTP_CONFIG=os.path.join(state_dir, "config"),
+            ):
+                with self.patched_attr(socket, "create_connection", fake_connect):
+                    with self.patched_attr(ssh_totp, "run_wrapper", fake_run):
+                        result = ssh_totp._ensure_socks_connection("127.0.0.1:7070")
+
+        self.assertIs(result, fake_socket)
+        self.assertEqual(calls[0], ["-O", "check", "gw"])
+        self.assertEqual(calls[1], ["-O", "forward", "-D", "127.0.0.1:7070", "gw"])
 
     def test_ensure_socks_connection_reports_gateway_start_failure(self):
         import socket
@@ -554,7 +680,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as state_dir:
             with self.patched_environ(SSH_TOTP_STATE_DIR=state_dir):
                 with self.patched_attr(socket, "create_connection", missing_listener):
-                    with self.patched_attr(ssh_totp, "run_wrapper", lambda _argv: 23):
+                    with self.patched_attr(ssh_totp, "run_wrapper", lambda _argv, stdio=None: 23):
                         with self.assertRaisesRegex(RuntimeError, "automatic gateway start failed.*23"):
                             ssh_totp._ensure_socks_connection("127.0.0.1:7070")
 
@@ -576,7 +702,9 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                 first_checks.wait(timeout=2)
             raise ConnectionRefusedError("listener absent")
 
-        def fake_run(argv):
+        def fake_run(argv, stdio=None):
+            if "-O" in argv and "check" in argv:
+                return 1  # no master yet
             with start_guard:
                 starts.append(argv)
             started.set()
@@ -592,7 +720,11 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                 errors.append(exc)
 
         with tempfile.TemporaryDirectory() as state_dir:
-            with self.patched_environ(SSH_TOTP_STATE_DIR=state_dir):
+            with self.patched_environ(
+                SSH_TOTP_STATE_DIR=state_dir,
+                SSH_TOTP_JUMP_ALIAS=None,
+                SSH_TOTP_CONFIG=os.path.join(state_dir, "config"),
+            ):
                 with self.patched_attr(socket, "create_connection", fake_connect):
                     with self.patched_attr(ssh_totp, "run_wrapper", fake_run):
                         threads = [threading.Thread(target=worker) for _ in range(2)]

@@ -120,12 +120,57 @@ def _hop_host(hop: str) -> str:
     return host
 
 
+def _gateway_from_tokens(tokens: List[str]) -> Optional[str]:
+    """Explicit gateway alias carried by a ProxyCommand (``--gateway ALIAS``)."""
+    for index, token in enumerate(tokens):
+        if token in {"--gateway", "-g"} and index + 1 < len(tokens):
+            return tokens[index + 1]
+        if token.startswith("--gateway="):
+            return token.split("=", 1)[1]
+    return None
+
+
 def _program_name(command: str) -> str:
     return re.split(r"[\\/]", command.strip("\"'"))[-1].lower()
 
 
-def default_jump_alias() -> str:
-    return os.environ.get("SSH_TOTP_JUMP_ALIAS", DEFAULT_JUMP_ALIAS)
+def ssh_config_path(configured: Optional[str] = None) -> str:
+    """Path of the ssh config this wrapper parses (``SSH_TOTP_CONFIG`` wins)."""
+    if configured:
+        return configured
+    override = os.environ.get("SSH_TOTP_CONFIG", "").strip()
+    return override or os.path.expanduser("~/.ssh/config")
+
+
+def _config_gateway_alias(config_file: str) -> Optional[str]:
+    """Gateway alias recorded in the ssh config itself.
+
+    ``configure`` writes ``# totp_gateway:``; hand-written configs fall back to
+    the first host marked ``# totp_master: yes``.
+    """
+    blocks, _metadata = _read_config(config_file)
+    for _aliases, _options, metadata in blocks:
+        gateway = metadata.get("totp_gateway", "").strip()
+        if gateway:
+            return gateway
+    for aliases, _options, metadata in blocks:
+        if metadata.get("totp_master", "").strip().lower() in {"1", "true", "yes", "on"}:
+            if aliases:
+                return aliases[0]
+    return None
+
+
+def default_jump_alias(config_file: Optional[str] = None) -> str:
+    """Resolve the gateway alias instead of assuming it is ``x``.
+
+    ``SSH_TOTP_JUMP_ALIAS`` wins, then what the ssh config records, and only
+    then the historical default. Any config produced by ``configure`` (with any
+    ``--jump-alias``) therefore drives automatic startup without extra env.
+    """
+    override = os.environ.get("SSH_TOTP_JUMP_ALIAS", "").strip()
+    if override:
+        return override
+    return _config_gateway_alias(ssh_config_path(config_file)) or DEFAULT_JUMP_ALIAS
 
 
 def _ssh_option_key(option: str) -> str:
@@ -210,7 +255,11 @@ def _read_config(config_path: str) -> Tuple[List[Tuple[List[str], Dict[str, str]
             stripped = raw_line.strip()
             lower = stripped.lower()
             if stripped.startswith("#"):
-                meta = re.match(r"#\s*(totp_secret|totp_prompt|totp_master)\s*:\s*(.*)$", stripped, re.IGNORECASE)
+                meta = re.match(
+                    r"#\s*(totp_secret|totp_prompt|totp_master|totp_gateway)\s*:\s*(.*)$",
+                    stripped,
+                    re.IGNORECASE,
+                )
                 if meta:
                     pending_metadata[meta.group(1).lower()] = meta.group(2).strip()
                 continue
@@ -314,11 +363,11 @@ def _proxy_targets(config_path: str, alias: str) -> List[str]:
                 if target:
                     targets.append(_host_part(target))
             elif proxy_program in {"debug_proxy.cmd", "debug_proxy.sh", "debug_proxy_win.py"}:
-                targets.append(default_jump_alias())
+                targets.append(_gateway_from_tokens(tokens) or default_jump_alias(config_path))
             elif proxy_program in {"sshotp", "sshotp.cmd", "ssh_totp.py"} and "--socks" in tokens:
-                targets.append(default_jump_alias())
+                targets.append(_gateway_from_tokens(tokens) or default_jump_alias(config_path))
             elif len(tokens) > 1 and _program_name(tokens[1]) == "ssh_totp.py" and "--socks" in tokens:
-                targets.append(default_jump_alias())
+                targets.append(_gateway_from_tokens(tokens) or default_jump_alias(config_path))
             else:
                 targets.extend(
                     _host_part(m) for m in re.findall(r"[\w.-]+@([A-Za-z0-9_.-]+)", proxy_command)
@@ -330,7 +379,7 @@ def _proxy_targets(config_path: str, alias: str) -> List[str]:
 def resolve_totp_for_args(args: List[str], config_path: Optional[str] = None) -> Optional[dict]:
     """Return the TOTP metadata that answers the target in ``args`` (or None)."""
     if config_path is None:
-        config_path = os.path.expanduser("~/.ssh/config")
+        config_path = ssh_config_path()
     target = _target_from_ssh_args(args)
     if not target:
         return None
@@ -619,28 +668,61 @@ def _env_with_totp(totp: Optional[dict], real_ssh: str) -> dict:
     return env
 
 
-def run_wrapper(argv: List[str]) -> int:
-    """The sshotp behaviour: resolve OTP, add multiplexing, exec real ssh."""
+def run_wrapper(argv: List[str], stdio: Optional[tuple] = None) -> int:
+    """The sshotp behaviour: resolve OTP, add multiplexing, exec real ssh.
+
+    Every OTP target is multiplexed, not just ``-N`` masters: one authenticated
+    connection then serves shells, scp, git and IDE probes for ControlPersist,
+    instead of each one burning a fresh single-use code. ``stdio`` overrides the
+    inherited descriptors (used by background masters that must not hold the
+    caller's pipes open).
+    """
     totp = resolve_totp_for_args(argv)
     real_ssh = _real_ssh_executable()
     if totp:
         if totp.get("via_proxy"):
             cmd = [_plain_ssh_executable(), *argv]
             env = _env_with_totp(None, real_ssh)
-        elif not totp.get("master") or not _uses_master_control(argv):
-            final = normalize_totp_args(argv)
-            cmd = [real_ssh, *final]
-            env = _env_with_totp(totp, real_ssh)
         else:
             final = normalize_totp_args(argv)
             mux = multiplex_args(final)
-            _prune_stale_control_socket(real_ssh, final, mux)
-            cmd = [real_ssh, *mux, *socks_master_args(final), *final]
+            if totp.get("master") and _uses_master_control(final):
+                _prune_stale_control_socket(real_ssh, final, mux)
+                cmd = [real_ssh, *mux, *socks_master_args(final), *final]
+            else:
+                cmd = [real_ssh, *mux, *final]
             env = _env_with_totp(totp, real_ssh)
     else:
         cmd = [_plain_ssh_executable(), *argv]
         env = _env_with_totp(None, real_ssh)
-    return subprocess.call(cmd, env=env)
+    if stdio is None:
+        return subprocess.call(cmd, env=env)
+    return subprocess.call(cmd, env=env, stdin=stdio[0], stdout=stdio[1], stderr=stdio[2])
+
+
+def _run_detached(argv: List[str]) -> int:
+    """Start a background gateway master without inheriting our stdio.
+
+    ``ssh -f`` leaves the forked master holding the inherited stderr, so any
+    caller that reads a pipe (``otp-up x | cat``, script subprocess.PIPE, IDE
+    log capture) would wait for EOF forever after the output was produced.
+    """
+    stderr_target = subprocess.DEVNULL
+    log_handle = None
+    log_path = os.environ.get("SSH_TOTP_SOCKS_LOG", "")
+    if log_path:
+        try:
+            log_handle = open(log_path, "a", encoding="utf-8")
+            stderr_target = log_handle
+        except OSError:
+            log_handle = None
+    try:
+        return run_wrapper(
+            argv, stdio=(subprocess.DEVNULL, subprocess.DEVNULL, stderr_target)
+        )
+    finally:
+        if log_handle is not None:
+            log_handle.close()
 
 
 def _socks_address(socks: str) -> Tuple[str, int]:
@@ -751,7 +833,42 @@ def _socks_auto_start_enabled() -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
-def _ensure_socks_connection(socks: str):
+def _gateway_master_state(jump_alias: str) -> int:
+    """Return 0 when a multiplexing master for the gateway is already running."""
+    return run_wrapper(["-O", "check", jump_alias], stdio=(subprocess.DEVNULL,) * 3)
+
+
+def cmd_up(jump_alias: Optional[str] = None) -> int:
+    """Expose the gateway SOCKS listener, reusing an existing master if any."""
+    socks = os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)
+    try:
+        _ensure_socks_connection(socks, jump_alias)
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        print(f"otp: cannot prepare gateway SOCKS {socks} ({exc})", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _gateway_control(alias: str, action: str) -> int:
+    totp = resolve_totp_for_args([alias])
+    if not totp:
+        print(f"otp: {alias} has no TOTP metadata", file=sys.stderr)
+        return 1
+    if totp.get("via_proxy"):
+        print(f"otp: {alias} is reached through gateway {totp['alias']}", file=sys.stderr)
+        return 1
+    return run_wrapper(["-O", action, alias])
+
+
+def cmd_status(jump_alias: Optional[str] = None) -> int:
+    return _gateway_control(jump_alias or default_jump_alias(), "check")
+
+
+def cmd_down(jump_alias: Optional[str] = None) -> int:
+    return _gateway_control(jump_alias or default_jump_alias(), "exit")
+
+
+def _ensure_socks_connection(socks: str, jump_alias: Optional[str] = None):
     """Return a live SOCKS socket, starting the OTP gateway master if needed."""
     try:
         return _connect_socks(socks)
@@ -768,9 +885,20 @@ def _ensure_socks_connection(socks: str):
         except OSError:
             pass
 
-        jump_alias = default_jump_alias()
-        start_argv = ["-MNf", "-D", socks, jump_alias]
-        result = run_wrapper(start_argv)
+        config_file = ssh_config_path()
+        jump_alias = jump_alias or default_jump_alias(config_file)
+        config_args = ["-F", config_file] if os.path.isfile(config_file) else []
+        if _gateway_master_state(jump_alias) == 0:
+            # A master already serves this gateway: attach the SOCKS listener to
+            # it instead of authenticating a second time (masters allow adding
+            # forwards later, and the forward lives as long as the master).
+            result = run_wrapper(
+                ["-O", "forward", "-D", socks, jump_alias],
+                stdio=(subprocess.DEVNULL,) * 3,
+            )
+        else:
+            start_argv = ["-MNf", "-D", socks, *config_args, jump_alias]
+            result = _run_detached(start_argv)
         if result != 0:
             raise RuntimeError(
                 f"automatic gateway start failed for {jump_alias} with exit code {result}"
@@ -912,11 +1040,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == "--real-ssh":
         print(_real_ssh_executable())
         return 0
-    if argv and argv[0] == "--socks":
-        if len(argv) < 3:
+    if argv and argv[0] == "--default-jump":
+        print(default_jump_alias(argv[1] if len(argv) > 1 else None))
+        return 0
+    if argv and argv[0] in {"--up", "--status", "--down"}:
+        alias = argv[1] if len(argv) > 1 else None
+        if argv[0] == "--up":
+            return cmd_up(alias)
+        if argv[0] == "--status":
+            return cmd_status(alias)
+        return cmd_down(alias)
+    if argv and argv[0] in {"--socks", "--gateway"}:
+        gateway = _gateway_from_tokens(argv)
+        if gateway:
+            os.environ["SSH_TOTP_JUMP_ALIAS"] = gateway
+        if "--socks" not in argv:
+            print("usage: ssh_totp.py --gateway ALIAS --socks <host> <port>", file=sys.stderr)
+            return 2
+        index = argv.index("--socks")
+        if len(argv) < index + 3:
             print("usage: ssh_totp.py --socks <host> <port>", file=sys.stderr)
             return 2
-        return _socks_relay(argv[1], argv[2])
+        return _socks_relay(argv[index + 1], argv[index + 2])
     return run_wrapper(argv)
 
 

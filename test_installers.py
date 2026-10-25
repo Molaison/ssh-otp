@@ -52,7 +52,7 @@ class ConfigureSSHTests(unittest.TestCase):
             self.assertIn("Host x", content)
             self.assertIn("Host compute", content)
             self.assertIn("Port 2222", content)
-            self.assertRegex(content, r'ProxyCommand ".*ssh otp/sshotp\.cmd" --socks %h %p')
+            self.assertRegex(content, r'ProxyCommand ".*ssh otp/sshotp\.cmd" --gateway x --socks %h %p')
             self.assertIn("Host existing", content)
             self.assertNotIn(VALID_SECRET, first_out)
             backups = list(config.parent.glob("config.bak-ssh-otp-*"))
@@ -78,7 +78,7 @@ class ConfigureSSHTests(unittest.TestCase):
             ])
             self.assertEqual(result, 0, error)
             content = config.read_text(encoding="utf-8")
-            self.assertIn("/sshotp --socks %h %p", content)
+            self.assertIn("/sshotp --gateway x --socks %h %p", content)
             self.assertNotIn("sshotp.cmd", content)
             self.assertNotIn(VALID_SECRET, output)
 

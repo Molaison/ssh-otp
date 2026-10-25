@@ -70,6 +70,10 @@ if [ "${SSH_TOTP_SKIP_GIT:-0}" != "1" ] && command -v git >/dev/null 2>&1; then
   echo "  git: core.sshCommand=$git_command"
 fi
 
+if ! "$dir/sshotp" --resolve-totp "$("$dir/sshotp" --default-jump 2>/dev/null || echo x)" >/dev/null 2>&1; then
+  echo "  note: no TOTP host is configured yet -- run $dir/configure ... to generate the ssh block"
+fi
+
 cat <<EOF
 
 Done. Next:

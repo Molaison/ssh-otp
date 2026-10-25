@@ -6,11 +6,30 @@ keyboard-interactive challenge. It supports Windows, macOS, Linux, and Termux.
 ## What It Provides
 
 - Direct OTP aliases such as `X` and `x`.
-- On-demand startup of the default `x` gateway master.
+- On-demand startup of the default gateway master (`x` unless the ssh config says otherwise).
 - One local SOCKS listener (default `127.0.0.1:7070`) reused for about eight hours.
+- One verification code per host per eight hours: every OTP connection multiplexes, and the
+  SOCKS listener attaches to a master that is already running instead of authenticating again.
 - Cross-process startup locking so concurrent IDE, Git, and terminal probes issue one OTP.
 - Transparent behavior for hosts without TOTP metadata.
 - Idempotent shell, PowerShell, Git, and SSH-config setup.
+
+## From Scratch (empty ssh config)
+
+```sh
+git clone https://github.com/Molaison/ssh-otp.git ~/.ssh/ssh_otp
+sh ~/.ssh/ssh_otp/install.sh
+~/.ssh/ssh_otp/configure \
+  --jump-host gateway.example.com \
+  --jump-user alice \
+  --identity-file ~/.ssh/id_rsa \
+  --proxy 'compute=compute.internal,alice,22'
+```
+
+That is the whole setup: `install.sh` never touches `~/.ssh/config`, and `configure`
+writes one managed block that the wrapper can drive on its own. `ssh x` opens the
+gateway (one code, then reused), `ssh compute` tunnels through its SOCKS listener,
+and `otp-up` / `otp-status` / `otp-down` default to the gateway recorded there.
 
 | Platform | Installer | SSH launcher | Automatic integration |
 | --- | --- | --- | --- |
@@ -86,7 +105,9 @@ macOS, Linux, or Termux:
 
 Repeat `--proxy ALIAS=HOST[,USER[,PORT]]` for additional nodes. The jump alias
 defaults to lowercase `x`; use `--jump-alias` or `SSH_TOTP_JUMP_ALIAS` to
-override it. `--platform auto` selects `sshotp.cmd` on Windows and `sshotp` on
+override it. The alias is written into the block as `# totp_gateway:` and into
+each `ProxyCommand`, so automatic startup follows it without any extra
+environment. `--platform auto` selects `sshotp.cmd` on Windows and `sshotp` on
 POSIX. Use `--dry-run` to preview a redacted generated block.
 
 For unattended configuration, put the Base32 secret in `SSH_TOTP_SECRET` and
@@ -99,26 +120,28 @@ A sanitized manual configuration remains available in
 ## Use
 
 Connect normally. If the SOCKS listener is absent, the first proxied connection
-starts the gateway master and answers its OTP automatically:
+starts the gateway master (or adds the listener to a master that is already
+running) and answers its OTP automatically:
 
 ```sh
 ssh x
 ssh compute
 ```
 
-Later connections reuse the same gateway. Manual controls remain available for
-prewarming and diagnostics:
+Later connections reuse the same master and listener. Manual controls default to
+the gateway recorded in the ssh config:
 
 ```sh
-otp-up x
-otp-status x
-otp-down x
+otp-up
+otp-status
+otp-down
 ```
 
 Useful overrides:
 
 - `SSH_TOTP_AUTO_START=0` disables on-demand master startup.
-- `SSH_TOTP_JUMP_ALIAS=X` selects another gateway alias.
+- `SSH_TOTP_JUMP_ALIAS` overrides the gateway alias read from the ssh config.
+- `SSH_TOTP_CONFIG=/path/to/config` points the wrapper (and automatic startup) at another ssh config.
 - `SSH_OTP_SOCKS=127.0.0.1:7071` changes the listener.
 - `SSH_TOTP_PYTHON=/path/to/python3` pins the interpreter.
 - `SSH_TOTP_SOCKS_LOG=/path/to/log` enables payload-free relay diagnostics.
