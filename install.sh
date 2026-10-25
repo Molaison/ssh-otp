@@ -74,12 +74,29 @@ if ! "$dir/sshotp" --resolve-totp "$("$dir/sshotp" --default-jump 2>/dev/null ||
   echo "  note: no TOTP host is configured yet -- run $dir/configure ... to generate the ssh block"
 fi
 
+# 5. GUI clients: VS Code family gets remote.SSH.path (JSONC preserved); apps
+# that cannot spawn ssh (Termius, JetBrains) get the SOCKS endpoint printed.
+if [ "${SSH_TOTP_SKIP_GUI:-0}" != "1" ]; then
+  py="${SSH_TOTP_PYTHON:-}"
+  if [ -z "$py" ]; then
+    for candidate in python3 python; do
+      if command -v "$candidate" >/dev/null 2>&1; then py="$candidate"; break; fi
+    done
+  fi
+  if [ -n "$py" ]; then
+    "$py" "$dir/gui_setup.py" --wrapper-dir "$dir" || true
+  else
+    echo "  gui: python not found; skipped editor settings"
+  fi
+fi
+
 cat <<EOF
 
 Done. Next:
   * Configure host-specific values without editing SSH config: $dir/configure --help
   * Restart your shell (or: . "$rc"), then use ssh normally (x starts automatically)
   * Manual controls remain available: otp-up x / otp-status x / otp-down x
-  * VS Code:  set  "remote.SSH.path": "$dir/sshotp"
+  * VS Code:  remote.SSH.path is set automatically (SSH_TOTP_SKIP_GUI=1 to skip)
+  * Termius / JetBrains: use the SOCKS5 endpoint printed above, kept alive by otp-up
   * rsync:    rsync -e "$dir/sshotp" ...
 EOF

@@ -80,8 +80,30 @@ wrapper on the shell path, install the `otp-*` helpers, and set Git's global
 `core.sshCommand`. Use `-SkipGitConfig` on Windows or
 `SSH_TOTP_SKIP_GIT=1` on POSIX to leave Git unchanged.
 
-VS Code uses JSON-with-comments, so its setting is intentionally not rewritten.
-Set `remote.SSH.path` to `sshotp.cmd` on Windows or `sshotp` on POSIX if needed.
+## GUI Clients
+
+`install.sh` / `install.ps1` point VS Code (Code, Insiders, VSCodium) at the wrapper by
+setting `remote.SSH.path` in the user `settings.json`. Only that one key is touched, so
+comments and unrelated settings survive; `SSH_TOTP_SKIP_GUI=1` (or `-SkipGuiConfig`)
+skips it. Remote - SSH, its terminals and the git calls they make then answer the code
+automatically, with no per-workspace tuning.
+
+Apps that implement SSH themselves (Termius, JetBrains, ...) cannot run a helper binary.
+Give the host a SOCKS5 proxy on the base listener instead:
+
+| base | SOCKS5 endpoint | notes |
+| --- | --- | --- |
+| `x` | `127.0.0.1:7070` | first entry point |
+| `X` | `127.0.0.1:7071` | second entry point |
+
+```sh
+otp-up          # opens the first base's listener (one code, reused for 8 h)
+otp-status      # "Master running (pid=...)" when the listener is alive
+```
+
+The listener is the same one `ProxyCommand` uses, so the app gets exactly the ssh
+experience through that base. The code is answered once by `otp-up`; afterwards the app
+connects without prompting.
 
 ## Configure Without Editing SSH Config
 

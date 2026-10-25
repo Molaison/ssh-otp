@@ -10,9 +10,11 @@ configure / configure.cmd  # POSIX and Windows configuration launchers.
 find_python.cmd       # Shared portable Python discovery for Windows launchers.
 ssh_totp.py          # Core wrapper and SOCKS relay.
 totp_askpass.py      # TOTP askpass helper.
+gui_setup.py          # VS Code remote.SSH.path + SOCKS endpoints for app clients.
 sshotp               # POSIX launcher.
 sshotp.cmd           # Windows launcher.
 install.sh           # POSIX installer.
 install.ps1          # Windows PowerShell installer.
 test_ssh_totp_regression.py  # Regression tests.
 test_installers.py    # Installer and generated-config portability tests.
+test_gui_setup.py     # JSONC editor-settings tests.
