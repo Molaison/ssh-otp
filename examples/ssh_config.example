@@ -2,6 +2,7 @@
 # Replace BASE32SECRET, host, user, port, and key path.
 # totp_secret: BASE32SECRET
 # totp_prompt: verification|verify|otp|2fa|two[- ]factor|authenticator|one[- ]time password|oath|code
+# totp_master: yes
 Host X
     HostName gateway.example.com
     User user
@@ -31,7 +32,7 @@ Host f101-windows
 Host f101-posix
     HostName f101.internal.example.com
     User user
-    ProxyCommand ~/.ssh/ssh_otp/sshotp --gateway x --socks %h %p
+    ProxyCommand ~/.ssh/ssh_otp/sshotp --gateway X --socks %h %p
 
 # Ordinary host. The wrapper passes this through unchanged.
 Host ordinary

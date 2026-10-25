@@ -109,7 +109,21 @@ macOS, Linux, or Termux:
   --proxy 'compute=compute.internal,alice,22'
 ```
 
-Repeat `--proxy ALIAS=HOST[,USER[,PORT]]` for additional nodes. The jump alias
+A cluster with two entry points keeps both in the same managed block:
+
+```sh
+~/.ssh/ssh_otp/configure \
+  --jump-host 10.10.1.100 --jump-user alice \
+  --gateway 'X=public.example.com,alice,50001' \
+  --proxy 'compute=compute.internal,alice,22@X'
+```
+
+Each `--gateway ALIAS=HOST[,USER[,PORT[,IDENTITY]]]` is an entry point, every one keeps
+its own SOCKS listener (`7070`, `7071`, ... in config order), `@ALIAS` selects the
+entry a proxied host tunnels through, and `ssh x` / `ssh X` pick the entry directly.
+Re-running the command updates that one block, so no entry is dropped.
+
+Repeat `--proxy ALIAS=HOST[,USER[,PORT]][@GATEWAY]` for additional nodes. The jump alias
 defaults to lowercase `x`; use `--jump-alias` or `SSH_TOTP_JUMP_ALIAS` to
 override it. The alias is written into the block as `# totp_gateway:` and into
 each `ProxyCommand`, so automatic startup follows it without any extra

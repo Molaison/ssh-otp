@@ -415,9 +415,20 @@ class SSHTOTPRegressionTests(unittest.TestCase):
             calls.append((args, env))
             return 0
 
+        config = self.write_config(
+            """
+            # totp_secret: SECRETX
+            # totp_master: yes
+            Host X
+                HostName 203.0.113.9
+                Port 50001
+            """
+        )
         old_socks = os.environ.get("SSH_OTP_SOCKS")
         os.environ["SSH_OTP_SOCKS"] = "127.0.0.1:7070"
+        os.environ["SSH_TOTP_CONFIG"] = config
         self.addCleanup(lambda: os.environ.pop("SSH_OTP_SOCKS", None))
+        self.addCleanup(lambda: os.environ.pop("SSH_TOTP_CONFIG", None))
         if old_socks is not None:
             self.addCleanup(lambda: os.environ.__setitem__("SSH_OTP_SOCKS", old_socks))
 
@@ -473,6 +484,34 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(ssh_totp.resolve_totp_for_args(["debug"], config)["alias"], "x")
+
+    def test_second_entry_point_keeps_its_own_socks_port(self):
+        config = self.write_config(
+            """
+            # totp_secret: SECRETLOWER
+            # totp_master: yes
+            # totp_gateway: x
+            Host x
+                HostName 10.0.0.1
+            # totp_secret: SECRETLOWER
+            # totp_master: yes
+            Host X
+                HostName 203.0.113.9
+                Port 50001
+            Host node
+                HostName 10.0.0.5
+                ProxyCommand /opt/ssh_otp/sshotp --gateway X --socks %h %p
+            """
+        )
+        with self.patched_environ(SSH_OTP_SOCKS=None, SSH_TOTP_JUMP_ALIAS=None):
+            self.assertEqual(ssh_totp._config_gateways(config), ["x", "X"])
+            self.assertEqual(ssh_totp.gateway_socks("x", config), "127.0.0.1:7070")
+            self.assertEqual(ssh_totp.gateway_socks("X", config), "127.0.0.1:7071")
+            self.assertEqual(ssh_totp.gateway_socks("", config), "127.0.0.1:7070")
+            self.assertEqual(ssh_totp.resolve_totp_for_args(["node"], config)["alias"], "X")
+        with self.patched_environ(SSH_OTP_SOCKS="127.0.0.1:7088", SSH_TOTP_JUMP_ALIAS=None):
+            self.assertEqual(ssh_totp.gateway_socks("x", config), "127.0.0.1:7088")
+            self.assertEqual(ssh_totp.gateway_socks("X", config), "127.0.0.1:7071")
 
     def test_default_gateway_follows_totp_gateway_metadata(self):
         config = self.write_config(

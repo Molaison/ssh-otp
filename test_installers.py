@@ -97,6 +97,48 @@ class ConfigureSSHTests(unittest.TestCase):
             self.assertIn("single line", error)
             self.assertFalse(config.exists())
 
+    def test_two_gateways_are_both_kept(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "config"
+            args = [
+                "--config", str(config),
+                "--wrapper-dir", str(root / "ssh_otp"),
+                "--platform", "posix",
+                "--jump-host", "internal.example.com",
+                "--jump-user", "alice",
+                "--gateway", "X=public.example.com,alice,50001",
+                "--proxy", "compute=compute.internal,alice,22@X",
+            ]
+            first, out, err = self.run_configure(args)
+            self.assertEqual(first, 0, err)
+            content = config.read_text(encoding="utf-8")
+            self.assertIn("Host x", content)
+            self.assertIn("Host X", content)
+            self.assertIn("HostName public.example.com", content)
+            self.assertIn("Port 50001", content)
+            self.assertEqual(content.count("# totp_master: yes"), 2)
+            self.assertIn("--gateway X --socks %h %p", content)
+
+            second, out2, err2 = self.run_configure(args)
+            self.assertEqual(second, 0, err2)
+            self.assertIn("unchanged", out2)
+            self.assertEqual(config.read_text(encoding="utf-8"), content)
+
+    def test_proxy_with_unknown_gateway_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "config"
+            result, output, error = self.run_configure([
+                "--config", str(config),
+                "--jump-host", "gateway.example.com",
+                "--jump-user", "alice",
+                "--proxy", "compute=compute.internal@missing",
+            ])
+            self.assertEqual(result, 2)
+            self.assertIn("unknown gateway", error)
+            self.assertFalse(config.exists())
+
     def test_proxy_alias_that_already_exists_warns_about_shadowing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

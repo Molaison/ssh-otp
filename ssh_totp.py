@@ -160,6 +160,41 @@ def _config_gateway_alias(config_file: str) -> Optional[str]:
     return None
 
 
+def _config_gateways(config_file: str) -> List[str]:
+    """Aliases of every entry point in the ssh config, in file order.
+
+    ``# totp_master: yes`` marks a host that can hold the SOCKS listener, so
+    one cluster may expose several entries (internal, public, ...) and keep
+    them all.
+    """
+    blocks, _metadata = _read_config(config_file)
+    gateways: List[str] = []
+    for aliases, _options, metadata in blocks:
+        if metadata.get("totp_master", "").strip().lower() in {"1", "true", "yes", "on"}:
+            for alias in aliases:
+                if alias not in gateways:
+                    gateways.append(alias)
+    return gateways
+
+
+def gateway_socks(alias: str = "", config_file: Optional[str] = None) -> str:
+    """SOCKS listener for one gateway: 7070 + its position in the config.
+
+    A single cluster with two entry points needs two listeners, otherwise the
+    second master cannot bind (``ExitOnForwardFailure``) and every proxied host
+    behind it fails. ``SSH_OTP_SOCKS`` still overrides the primary gateway.
+    """
+    override = os.environ.get("SSH_OTP_SOCKS", "").strip()
+    if os.environ.get("SSH_TOTP_MANAGED_ROUTE") == "1" and override:
+        return override  # managed roaming owns its ports
+    gateways = _config_gateways(ssh_config_path(config_file))
+    index = gateways.index(alias) if alias in gateways else 0
+    if override and (not gateways or alias in ("", gateways[0])):
+        return override
+    host, _separator, port = DEFAULT_SOCKS.rpartition(":")
+    return f"{host}:{int(port) + index}"
+
+
 def default_jump_alias(config_file: Optional[str] = None) -> str:
     """Resolve the gateway alias instead of assuming it is ``x``.
 
@@ -585,13 +620,13 @@ def _has_dynamic_forward(argv: List[str]) -> bool:
     return False
 
 
-def socks_master_args(argv: List[str]) -> List[str]:
+def socks_master_args(argv: List[str], socks: str) -> List[str]:
     """Open the gateway SOCKS listener for master sessions such as ssh -MNf X."""
     if not _has_short_flag(argv, "N"):
         return []
     extra: List[str] = []
     if not _has_dynamic_forward(argv):
-        extra += ["-D", os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)]
+        extra += ["-D", socks]
     if not _has_o_option(argv, "exitonforwardfailure"):
         # Without this, ssh backgrounds successfully after a bind failure and
         # leaves an unusable orphan master behind. The caller then sees exit 0
@@ -691,9 +726,7 @@ def _prewarm_interactive_master(totp: dict) -> None:
     behaviour (ssh prompts on the terminal).
     """
     try:
-        _ensure_socks_connection(
-            os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS), totp["alias"]
-        )
+        _ensure_socks_connection(gateway_socks(totp["alias"]), totp["alias"])
     except Exception:
         return
 
@@ -732,7 +765,8 @@ def run_wrapper(
             mux = multiplex_args(final)
             if totp.get("master") and _uses_master_control(final):
                 _prune_stale_control_socket(real_ssh, final, mux)
-                cmd = [real_ssh, *mux, *socks_master_args(final), *final]
+                socks = gateway_socks(totp.get("alias", ""))
+                cmd = [real_ssh, *mux, *socks_master_args(final, socks), *final]
             else:
                 cmd = [real_ssh, *mux, *final]
             env = _env_with_totp(totp, real_ssh)
@@ -896,7 +930,7 @@ def _gateway_master_state(jump_alias: str) -> int:
 
 def cmd_up(jump_alias: Optional[str] = None) -> int:
     """Expose the gateway SOCKS listener, reusing an existing master if any."""
-    socks = os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)
+    socks = gateway_socks(jump_alias or "")
     try:
         _ensure_socks_connection(socks, jump_alias)
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
@@ -999,7 +1033,8 @@ def _socks_relay(host: str, port: str) -> int:
     import struct
     import threading
 
-    socks = os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS)
+    gateway = default_jump_alias()
+    socks = gateway_socks(gateway)
     try:
         sock = _ensure_socks_connection(socks)
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
