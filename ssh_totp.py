@@ -680,7 +680,36 @@ def _env_with_totp(totp: Optional[dict], real_ssh: str) -> dict:
     return env
 
 
-def run_wrapper(argv: List[str], stdio: Optional[tuple] = None) -> int:
+def _prewarm_interactive_master(totp: dict) -> None:
+    """Authenticate once in a detached master when the client owns a tty.
+
+    OpenSSH before 8.4 ignores ``SSH_ASKPASS_REQUIRE``, so an interactive
+    session reads the one-time code from the terminal instead of the askpass
+    helper -- the code never gets answered automatically. A master started
+    over pipes has no tty, answers the code itself, and the interactive
+    session then multiplexes onto it. Any failure falls back to the old
+    behaviour (ssh prompts on the terminal).
+    """
+    try:
+        _ensure_socks_connection(
+            os.environ.get("SSH_OTP_SOCKS", DEFAULT_SOCKS), totp["alias"]
+        )
+    except Exception:
+        return
+
+
+def _needs_interactive_prewarm(argv: List[str]) -> bool:
+    if _uses_master_control(argv):
+        return False
+    isatty = getattr(sys.stdin, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def run_wrapper(
+    argv: List[str],
+    stdio: Optional[tuple] = None,
+    new_session: bool = False,
+) -> int:
     """The sshotp behaviour: resolve OTP, add multiplexing, exec real ssh.
 
     Every OTP target is multiplexed, not just ``-N`` masters: one authenticated
@@ -692,6 +721,8 @@ def run_wrapper(argv: List[str], stdio: Optional[tuple] = None) -> int:
     totp = resolve_totp_for_args(argv)
     real_ssh = _real_ssh_executable()
     pin = _explicit_config_args()
+    if totp and not totp.get("via_proxy") and _needs_interactive_prewarm(argv):
+        _prewarm_interactive_master(totp)
     if totp:
         if totp.get("via_proxy"):
             cmd = [_plain_ssh_executable(), *pin, *argv]
@@ -710,7 +741,14 @@ def run_wrapper(argv: List[str], stdio: Optional[tuple] = None) -> int:
         env = _env_with_totp(None, real_ssh)
     if stdio is None:
         return subprocess.call(cmd, env=env)
-    return subprocess.call(cmd, env=env, stdin=stdio[0], stdout=stdio[1], stderr=stdio[2])
+    return subprocess.call(
+        cmd,
+        env=env,
+        stdin=stdio[0],
+        stdout=stdio[1],
+        stderr=stdio[2],
+        start_new_session=new_session,
+    )
 
 
 def _run_detached(argv: List[str]) -> int:
@@ -730,8 +768,13 @@ def _run_detached(argv: List[str]) -> int:
         except OSError:
             log_handle = None
     try:
+        # A new session drops the controlling terminal: OpenSSH before 8.4
+        # would otherwise read the one-time code from /dev/tty instead of the
+        # askpass helper, even with stdin redirected.
         return run_wrapper(
-            argv, stdio=(subprocess.DEVNULL, subprocess.DEVNULL, stderr_target)
+            argv,
+            stdio=(subprocess.DEVNULL, subprocess.DEVNULL, stderr_target),
+            new_session=True,
         )
     finally:
         if log_handle is not None:

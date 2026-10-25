@@ -134,6 +134,12 @@ ssh x
 ssh compute
 ```
 
+Interactive logins never prompt for the code. OpenSSH before 8.4 cannot be told to use
+the askpass helper while a terminal is attached, so the first interactive connection
+authenticates once in a detached master (which has no controlling terminal) and the
+session multiplexes onto it. Only if that background start fails does ssh fall back to
+asking on the terminal, and a typed code still works.
+
 Later connections reuse the same master and listener. Manual controls default to
 the gateway recorded in the ssh config:
 

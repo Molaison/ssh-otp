@@ -347,6 +347,38 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertNotIn("ControlMaster", " ".join(ssh_totp.multiplex_args(["-M", "x"])))
         self.assertNotIn("ControlPath", " ".join(ssh_totp.multiplex_args(["-o", "ControlPath=/tmp/s", "x"])))
 
+    def test_run_wrapper_prewarms_master_when_a_tty_is_attached(self):
+        calls = []
+        prewarmed = []
+
+        class FakeStdin:
+            def isatty(self):
+                return True
+
+        def fake_resolve(args, config_path=None):
+            return {"alias": "x", "secret": "SECRETLOWER", "prompt": "otp", "master": True}
+
+        def fake_call(args, env):
+            calls.append(args)
+            return 0
+
+        with self.patched_environ(SSH_OTP_SOCKS=None):
+            with self.patched_attr(ssh_totp, "resolve_totp_for_args", fake_resolve):
+                with self.patched_attr(ssh_totp, "_real_ssh_executable", lambda: "REAL-SSH"):
+                    with self.patched_attr(
+                        ssh_totp,
+                        "_ensure_socks_connection",
+                        lambda socks, alias=None: prewarmed.append((socks, alias)),
+                    ):
+                        with self.patched_attr(ssh_totp.sys, "stdin", FakeStdin()):
+                            with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                                self.assertEqual(ssh_totp.run_wrapper(["x"]), 0)
+                                self.assertEqual(ssh_totp.run_wrapper(["-MNf", "x"]), 0)
+
+        # Only the interactive session prewarms; -N/-O callers do the work themselves.
+        self.assertEqual(prewarmed, [("127.0.0.1:7070", "x")])
+        self.assertIn("ControlMaster=auto", " ".join(calls[0]))
+
     def test_run_wrapper_multiplexes_regular_master_command(self):
         calls = []
 
@@ -511,8 +543,8 @@ class SSHTOTPRegressionTests(unittest.TestCase):
     def test_run_detached_starts_master_without_inheriting_stdio(self):
         calls = []
 
-        def fake_call(args, env, stdin=None, stdout=None, stderr=None):
-            calls.append((args, stdin, stdout, stderr))
+        def fake_call(args, env, stdin=None, stdout=None, stderr=None, start_new_session=False):
+            calls.append((args, stdin, stdout, stderr, start_new_session))
             return 0
 
         with self.patched_attr(ssh_totp, "resolve_totp_for_args", lambda args, config_path=None: None):
@@ -521,10 +553,11 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                     with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
                         self.assertEqual(ssh_totp._run_detached(["-MNf", "x"]), 0)
 
-        _args, stdin, stdout, stderr = calls[0]
+        _args, stdin, stdout, stderr, new_session = calls[0]
         self.assertIs(stdin, ssh_totp.subprocess.DEVNULL)
         self.assertIs(stdout, ssh_totp.subprocess.DEVNULL)
         self.assertIs(stderr, ssh_totp.subprocess.DEVNULL)
+        self.assertTrue(new_session)
 
     def test_run_wrapper_pins_explicit_config(self):
         calls = []
@@ -604,7 +637,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         starts = []
 
         with self.patched_attr(socket, "create_connection", lambda *_args, **_kwargs: fake_socket):
-            with self.patched_attr(ssh_totp, "run_wrapper", lambda argv, stdio=None: starts.append(argv) or 0):
+            with self.patched_attr(ssh_totp, "run_wrapper", lambda argv, stdio=None, new_session=False: starts.append(argv) or 0):
                 result = ssh_totp._ensure_socks_connection("127.0.0.1:7070")
 
         self.assertIs(result, fake_socket)
@@ -638,7 +671,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                 raise ConnectionRefusedError("listener absent")
             return fake_socket
 
-        def fake_run(argv, stdio=None):
+        def fake_run(argv, stdio=None, new_session=False):
             if "-O" in argv and "check" in argv:
                 return 1  # no master yet
             starts.append(argv)
@@ -671,7 +704,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                 return fake_socket
             raise ConnectionRefusedError("listener absent")
 
-        def fake_run(argv, stdio=None):
+        def fake_run(argv, stdio=None, new_session=False):
             calls.append(argv)
             if "check" in argv:
                 return 0  # a session master already serves the gateway
@@ -701,7 +734,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as state_dir:
             with self.patched_environ(SSH_TOTP_STATE_DIR=state_dir):
                 with self.patched_attr(socket, "create_connection", missing_listener):
-                    with self.patched_attr(ssh_totp, "run_wrapper", lambda _argv, stdio=None: 23):
+                    with self.patched_attr(ssh_totp, "run_wrapper", lambda _argv, stdio=None, new_session=False: 23):
                         with self.assertRaisesRegex(RuntimeError, "automatic gateway start failed.*23"):
                             ssh_totp._ensure_socks_connection("127.0.0.1:7070")
 
@@ -723,7 +756,7 @@ class SSHTOTPRegressionTests(unittest.TestCase):
                 first_checks.wait(timeout=2)
             raise ConnectionRefusedError("listener absent")
 
-        def fake_run(argv, stdio=None):
+        def fake_run(argv, stdio=None, new_session=False):
             if "-O" in argv and "check" in argv:
                 return 1  # no master yet
             with start_guard:
