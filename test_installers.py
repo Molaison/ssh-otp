@@ -82,6 +82,24 @@ class ConfigureSSHTests(unittest.TestCase):
             self.assertNotIn("sshotp.cmd", content)
             self.assertNotIn(VALID_SECRET, output)
 
+    def test_proxy_alias_that_already_exists_warns_about_shadowing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = root / "config"
+            config.write_text(
+                "Host compute\n    HostName direct.example.com\n", encoding="utf-8"
+            )
+            result, output, error = self.run_configure([
+                "--config", str(config),
+                "--jump-host", "gateway.example.com",
+                "--jump-user", "alice",
+                "--proxy", "compute=compute.internal",
+            ])
+            self.assertEqual(result, 0, error)
+            self.assertIn("already exist outside the managed block", error)
+            self.assertIn("compute", error)
+            self.assertNotIn(VALID_SECRET, output)
+
     def test_dry_run_redacts_secret_and_does_not_write(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = Path(temp_dir) / "config"

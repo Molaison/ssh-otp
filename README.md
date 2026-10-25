@@ -27,9 +27,15 @@ sh ~/.ssh/ssh_otp/install.sh
 ```
 
 That is the whole setup: `install.sh` never touches `~/.ssh/config`, and `configure`
-writes one managed block that the wrapper can drive on its own. `ssh x` opens the
-gateway (one code, then reused), `ssh compute` tunnels through its SOCKS listener,
-and `otp-up` / `otp-status` / `otp-down` default to the gateway recorded there.
+writes one managed block that the wrapper can drive on its own. Plain `ssh x` opens an
+interactive session on the gateway (no remote command needed); the first code is reused
+for the next eight hours. `ssh compute` then tunnels through the gateway's SOCKS
+listener, and `otp-up` / `otp-status` / `otp-down` default to the gateway recorded there.
+
+`--proxy` is only for hosts you reach *through* the gateway. Do not add it for a host
+that is already directly reachable: the managed block sits first in the file, so it
+would shadow your own entry. `configure` warns when a `--proxy` alias already exists
+outside the block.
 
 | Platform | Installer | SSH launcher | Automatic integration |
 | --- | --- | --- | --- |

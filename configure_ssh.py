@@ -58,6 +58,7 @@ class ConfigureResult:
     config_path: Path
     backup_path: Optional[Path]
     aliases: Sequence[str]
+    shadowed: Sequence[str] = ()
 
 
 def _single_line(value: str, label: str) -> str:
@@ -173,6 +174,24 @@ def build_managed_block(options: ConfigureOptions, secret: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def existing_host_aliases(existing: str) -> set:
+    """Host aliases already declared outside the managed block."""
+    outside = MANAGED_BLOCK_PATTERN.sub("", existing)
+    aliases = set()
+    for line in outside.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        keyword, _, rest = stripped.partition(" ")
+        keyword = keyword.lower()
+        if keyword == "match":
+            # Everything below a Match block is conditional; stop scanning.
+            break
+        if keyword == "host":
+            aliases.update(rest.split())
+    return aliases
+
+
 def _replace_managed_block(existing: str, block: str) -> str:
     begin_count = existing.count(BLOCK_BEGIN)
     end_count = existing.count(BLOCK_END)
@@ -194,8 +213,9 @@ def update_ssh_config(options: ConfigureOptions, secret: str) -> ConfigureResult
     block = build_managed_block(options, secret)
     updated = _replace_managed_block(existing, block)
     aliases = [options.jump_alias, *(proxy.alias for proxy in options.proxies)]
+    shadowed = sorted(set(aliases) & existing_host_aliases(existing))
     if updated == existing:
-        return ConfigureResult(False, config_path, None, aliases)
+        return ConfigureResult(False, config_path, None, aliases, shadowed)
 
     backup_path = None
     if options.backup and config_path.exists():
@@ -230,7 +250,7 @@ def update_ssh_config(options: ConfigureOptions, secret: str) -> ConfigureResult
     finally:
         if temp_path.exists():
             temp_path.unlink()
-    return ConfigureResult(True, config_path, backup_path, aliases)
+    return ConfigureResult(True, config_path, backup_path, aliases, shadowed)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -297,6 +317,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if result.backup_path:
         print(f"backup: {result.backup_path}")
     print("configured aliases: " + ", ".join(result.aliases))
+    if result.shadowed:
+        print(
+            "warning: these aliases already exist outside the managed block and will be "
+            "shadowed by it: " + ", ".join(result.shadowed) + "\n"
+            "         (the managed block is first, and ssh uses the first value it sees)",
+            file=sys.stderr,
+        )
     return 0
 
 
