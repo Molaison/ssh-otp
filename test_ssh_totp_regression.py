@@ -526,6 +526,27 @@ class SSHTOTPRegressionTests(unittest.TestCase):
         self.assertIs(stdout, ssh_totp.subprocess.DEVNULL)
         self.assertIs(stderr, ssh_totp.subprocess.DEVNULL)
 
+    def test_run_wrapper_pins_explicit_config(self):
+        calls = []
+
+        def fake_call(args, env):
+            calls.append(args)
+            return 0
+
+        config = self.write_config(
+            """
+            Host x
+                HostName 10.0.0.1
+            """
+        )
+        with self.patched_environ(SSH_TOTP_CONFIG=config):
+            with self.patched_attr(ssh_totp, "resolve_totp_for_args", lambda args, config_path=None: None):
+                with self.patched_attr(ssh_totp, "_plain_ssh_executable", lambda: "PLAIN-SSH"):
+                    with self.patched_attr(ssh_totp.subprocess, "call", fake_call):
+                        self.assertEqual(ssh_totp.run_wrapper(["ty", "true"]), 0)
+
+        self.assertEqual(calls[0], ["PLAIN-SSH", "-F", config, "ty", "true"])
+
     def test_run_wrapper_leaves_non_totp_targets_transparent(self):
         calls = []
 

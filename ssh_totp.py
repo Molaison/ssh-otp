@@ -652,6 +652,18 @@ def _askpass_program() -> str:
     return os.path.join(SCRIPT_DIR, name)
 
 
+def _explicit_config_args() -> List[str]:
+    """``-F`` pin so ssh reads the same config this wrapper parsed.
+
+    Only applied when ``SSH_TOTP_CONFIG`` is set, so the default path keeps
+    ssh's own resolution (and hand-written configs stay untouched).
+    """
+    override = os.environ.get("SSH_TOTP_CONFIG", "").strip()
+    if override and os.path.isfile(override):
+        return ["-F", override]
+    return []
+
+
 def _env_with_totp(totp: Optional[dict], real_ssh: str) -> dict:
     env = os.environ.copy()
     env["SSH_TOTP_REAL_SSH"] = real_ssh
@@ -679,12 +691,13 @@ def run_wrapper(argv: List[str], stdio: Optional[tuple] = None) -> int:
     """
     totp = resolve_totp_for_args(argv)
     real_ssh = _real_ssh_executable()
+    pin = _explicit_config_args()
     if totp:
         if totp.get("via_proxy"):
-            cmd = [_plain_ssh_executable(), *argv]
+            cmd = [_plain_ssh_executable(), *pin, *argv]
             env = _env_with_totp(None, real_ssh)
         else:
-            final = normalize_totp_args(argv)
+            final = [*pin, *normalize_totp_args(argv)]
             mux = multiplex_args(final)
             if totp.get("master") and _uses_master_control(final):
                 _prune_stale_control_socket(real_ssh, final, mux)
@@ -693,7 +706,7 @@ def run_wrapper(argv: List[str], stdio: Optional[tuple] = None) -> int:
                 cmd = [real_ssh, *mux, *final]
             env = _env_with_totp(totp, real_ssh)
     else:
-        cmd = [_plain_ssh_executable(), *argv]
+        cmd = [_plain_ssh_executable(), *pin, *argv]
         env = _env_with_totp(None, real_ssh)
     if stdio is None:
         return subprocess.call(cmd, env=env)
@@ -887,7 +900,7 @@ def _ensure_socks_connection(socks: str, jump_alias: Optional[str] = None):
 
         config_file = ssh_config_path()
         jump_alias = jump_alias or default_jump_alias(config_file)
-        config_args = ["-F", config_file] if os.path.isfile(config_file) else []
+        config_args: List[str] = []
         if _gateway_master_state(jump_alias) == 0:
             # A master already serves this gateway: attach the SOCKS listener to
             # it instead of authenticating a second time (masters allow adding
