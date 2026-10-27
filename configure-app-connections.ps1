@@ -495,7 +495,6 @@ function Get-AppMainPid {
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $fallbackPid = 0
     if (-not [string]::IsNullOrWhiteSpace($installRoot)) {
         while ([DateTime]::UtcNow -lt $deadline) {
             foreach ($process in @(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue)) {
@@ -511,9 +510,6 @@ function Get-AppMainPid {
                     if ($process.MainWindowHandle -ne 0) {
                         return [int]$process.Id
                     }
-                    if ($fallbackPid -eq 0) {
-                        $fallbackPid = [int]$process.Id
-                    }
                 }
                 catch {
                     continue
@@ -523,15 +519,6 @@ function Get-AppMainPid {
         }
     }
 
-    if ($fallbackPid -ne 0) {
-        return $fallbackPid
-    }
-    if ($ActivationPid -gt 0) {
-        $launcher = Get-Process -Id $ActivationPid -ErrorAction SilentlyContinue
-        if ($null -ne $launcher) {
-            return $ActivationPid
-        }
-    }
     throw "no running ChatGPT process matched the installed package location"
 }
 
